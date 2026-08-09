@@ -17,8 +17,8 @@ package com.risquanter.examples;
 
 import java.util.Arrays;
 
-import com.risquanter.simulation.util.distribution.metalog.Metalog;
-import com.risquanter.simulation.util.distribution.metalog.QPFitter;
+import com.risquanter.metalog.Metalog;
+import com.risquanter.metalog.QPFitter;
 
 import static com.risquanter.examples.ExampleUtil.loadResourceAsString;
 import static com.risquanter.examples.ExampleUtil.buildObsJson;

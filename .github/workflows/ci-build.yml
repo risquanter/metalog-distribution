@@ -3,12 +3,15 @@ name: CI Build + Sigstore provenance
 on:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
 
 permissions:
   contents: read
   id-token: write
+
+env:
+  # The only lines that differ between risquanter Maven repos:
+  ARTIFACT_ID: metalog-distribution
+  GROUP_PATH: com/risquanter
 
 jobs:
   build:
@@ -95,37 +98,38 @@ jobs:
 
           # Create Maven repository structure
           BUNDLE_DIR="maven_bundle"
-          mkdir -p "$BUNDLE_DIR/com/risquanter/simulation.util/$VERSION"
+          DEST="$BUNDLE_DIR/$GROUP_PATH/$ARTIFACT_ID/$VERSION"
+          mkdir -p "$DEST"
 
           # Copy artifacts with GPG signatures
-          cp target/simulation.util-$VERSION.jar "$BUNDLE_DIR/com/risquanter/simulation.util/$VERSION/"
-          cp target/simulation.util-$VERSION.jar.asc "$BUNDLE_DIR/com/risquanter/simulation.util/$VERSION/"
-          cp target/simulation.util-$VERSION-sources.jar "$BUNDLE_DIR/com/risquanter/simulation.util/$VERSION/"
-          cp target/simulation.util-$VERSION-sources.jar.asc "$BUNDLE_DIR/com/risquanter/simulation.util/$VERSION/"
-          cp target/simulation.util-$VERSION-javadoc.jar "$BUNDLE_DIR/com/risquanter/simulation.util/$VERSION/"
-          cp target/simulation.util-$VERSION-javadoc.jar.asc "$BUNDLE_DIR/com/risquanter/simulation.util/$VERSION/"
+          cp target/$ARTIFACT_ID-$VERSION.jar "$DEST/"
+          cp target/$ARTIFACT_ID-$VERSION.jar.asc "$DEST/"
+          cp target/$ARTIFACT_ID-$VERSION-sources.jar "$DEST/"
+          cp target/$ARTIFACT_ID-$VERSION-sources.jar.asc "$DEST/"
+          cp target/$ARTIFACT_ID-$VERSION-javadoc.jar "$DEST/"
+          cp target/$ARTIFACT_ID-$VERSION-javadoc.jar.asc "$DEST/"
 
           # Copy Sigstore JSON files
-          cp target/simulation.util-$VERSION.jar.sigstore.json "$BUNDLE_DIR/com/risquanter/simulation.util/$VERSION/"
-          cp target/simulation.util-$VERSION-sources.jar.sigstore.json "$BUNDLE_DIR/com/risquanter/simulation.util/$VERSION/"
-          cp target/simulation.util-$VERSION-javadoc.jar.sigstore.json "$BUNDLE_DIR/com/risquanter/simulation.util/$VERSION/"
+          cp target/$ARTIFACT_ID-$VERSION.jar.sigstore.json "$DEST/"
+          cp target/$ARTIFACT_ID-$VERSION-sources.jar.sigstore.json "$DEST/"
+          cp target/$ARTIFACT_ID-$VERSION-javadoc.jar.sigstore.json "$DEST/"
 
           # Copy POM and signature with proper naming
-          cp pom.xml "$BUNDLE_DIR/com/risquanter/simulation.util/$VERSION/simulation.util-$VERSION.pom"
+          cp pom.xml "$DEST/$ARTIFACT_ID-$VERSION.pom"
 
           # Copy POM signature if it exists (plugin signing)
-          if [[ -f target/simulation.util-$VERSION.pom.asc ]]; then
-            cp target/simulation.util-$VERSION.pom.asc "$BUNDLE_DIR/com/risquanter/simulation.util/$VERSION/simulation.util-$VERSION.pom.asc"
+          if [[ -f target/$ARTIFACT_ID-$VERSION.pom.asc ]]; then
+            cp target/$ARTIFACT_ID-$VERSION.pom.asc "$DEST/$ARTIFACT_ID-$VERSION.pom.asc"
           fi
 
           # Copy POM sigstore file if it exists
-          if [[ -f target/simulation.util-$VERSION.pom.sigstore.json ]]; then
-            cp target/simulation.util-$VERSION.pom.sigstore.json "$BUNDLE_DIR/com/risquanter/simulation.util/$VERSION/"
+          if [[ -f target/$ARTIFACT_ID-$VERSION.pom.sigstore.json ]]; then
+            cp target/$ARTIFACT_ID-$VERSION.pom.sigstore.json "$DEST/"
           fi
 
           # Generate checksums for Maven Central
-          cd "$BUNDLE_DIR/com/risquanter/simulation.util/$VERSION"
-          for file in simulation.util-$VERSION.jar simulation.util-$VERSION-sources.jar simulation.util-$VERSION-javadoc.jar simulation.util-$VERSION.pom; do
+          cd "$DEST"
+          for file in $ARTIFACT_ID-$VERSION.jar $ARTIFACT_ID-$VERSION-sources.jar $ARTIFACT_ID-$VERSION-javadoc.jar $ARTIFACT_ID-$VERSION.pom; do
             md5sum "$file" | awk '{print $1}' > "$file.md5"
             sha1sum "$file" | awk '{print $1}' > "$file.sha1"
           done
@@ -138,7 +142,7 @@ jobs:
 
           # Also create simple artifacts for Sigstore signing
           mkdir -p out
-          cp target/simulation.util-*.jar out/
+          cp target/$ARTIFACT_ID-*.jar out/
           cp pom.xml out/
           cd out
           sha256sum *.jar pom.xml > checksums.sha256
@@ -164,7 +168,6 @@ jobs:
             cosign sign-blob --yes --bundle "${file}.attest.bundle" -
           done
 
-          # --- CHANGED: also sign pom.xml with Sigstore and produce pom.xml.bundle / pom.xml.sig / pom.xml.cert
           # Sign pom.xml and generate bundle + extracted sig/cert
           cosign sign-blob --yes --bundle "pom.xml.bundle" "pom.xml"
           jq -r '.Sig' "pom.xml.bundle" > "pom.xml.sig"
@@ -195,13 +198,11 @@ jobs:
         run: |
           set +e  # Don't fail on cleanup errors
 
-          # Clean up GPG (current - correct)
           if [ -n "${GNUPGHOME:-}" ] && [ -d "${GNUPGHOME}" ]; then
             rm -rf "${GNUPGHOME}"
           fi
           pkill -u "$(id -u)" gpg-agent 2>/dev/null || true
 
-          # Clean up build artifacts (missing)
           rm -rf maven_bundle 2>/dev/null
           rm -rf out 2>/dev/null
           rm -f maven-central-artifacts.zip 2>/dev/null

@@ -1,18 +1,22 @@
 ###############################################################
-# This workflow is adapted for Maven Central Publisher Portal
-# Migration from OSSRH: all endpoints, authentication, and deployment
-# now use the Central Publisher Portal API and token-based auth.
+# Release workflow for the Maven Central Publisher Portal.
 #
-# Required org-level secrets (shared across risquanter repos):
-#   - GPG_PRIVATE_KEY: ASCII-armored, symmetrically encrypted GPG private key for signing
-#   - GPG_PASSPHRASE: Passphrase for the GPG key (also decrypts the blob above)
-#   - TOTP_ORG: Base32 secret for TOTP verification
-#   - CENTRAL_PORTAL_ORG_TOKEN_NAME: Central Portal token username part
-#   - CENTRAL_PORTAL_ORG_TOKEN: Central Portal token secret part
+# Trust model (shared across risquanter repos):
+#   1. verify-authorization gates the run on a TOTP code
+#      (60-second period, YubiKey OATH credential).
+#   2. sign-and-publish downloads the bundle built by a trusted
+#      ci-build.yml run, verifies every artifact's Sigstore
+#      signature against that workflow's OIDC identity, and only
+#      then uploads to the Central Portal (staged, USER_MANAGED —
+#      publishing requires a manual click in the portal).
+#
+# Required org-level secrets:
+#   - TOTP_ORG:                       Base32 secret for TOTP verification
+#   - CENTRAL_PORTAL_ORG_TOKEN_NAME:  Central Portal token username part
+#   - CENTRAL_PORTAL_ORG_TOKEN:       Central Portal token secret part
 #
 # For details, see:
-#   https://central.sonatype.org/publish/publish-portal-maven/
-#   https://central.sonatype.org/publish/generate-portal-token/
+#   https://central.sonatype.org/publish/publish-portal-api/
 ###############################################################
 
 name: Release (Maven Central Publisher Portal, GPG-signed)
@@ -30,6 +34,11 @@ on:
 permissions:
   contents: write
   id-token: write
+
+env:
+  # The only lines that differ between risquanter Maven repos:
+  ARTIFACT_ID: metalog-distribution
+  GROUP_PATH: com/risquanter
 
 jobs:
   verify-authorization:
@@ -97,8 +106,7 @@ jobs:
           cd /tmp/maven-release
           unzip -q maven-central-artifacts.zip -d /tmp/maven-deployment-contents
 
-          # The JARs are located at: com/risquanter/simulation.util/$VERSION/
-          JAR_PATH="/tmp/maven-deployment-contents/com/risquanter/simulation.util/$VERSION"
+          JAR_PATH="/tmp/maven-deployment-contents/$GROUP_PATH/$ARTIFACT_ID/$VERSION"
           echo "Looking for JARs in: $JAR_PATH"
           ls -la "$JAR_PATH"
 
@@ -112,17 +120,17 @@ jobs:
           set -euo pipefail
 
           VERSION=$(xmlstarlet sel -t -v "/_:project/_:version" pom.xml)
-          JAR_PATH="/tmp/maven-deployment-contents/com/risquanter/simulation.util/$VERSION"
+          JAR_PATH="/tmp/maven-deployment-contents/$GROUP_PATH/$ARTIFACT_ID/$VERSION"
 
           echo "Verifying Sigstore signatures..."
 
           # Verify each JAR file against its Sigstore signature
           cd "$JAR_PATH"
-          for jar in simulation.util-*.jar; do
+          for jar in $ARTIFACT_ID-*.jar; do
             if [[ -f "${jar}.sigstore.json" ]]; then
               echo "Verifying $jar..."
               cosign verify-blob --bundle "${jar}.sigstore.json" \
-                --certificate-identity-regexp="https://github.com/risquanter/simulation-util/.github/workflows/ci-build.yml@refs/heads/main" \
+                --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/ci-build.yml@refs/heads/main" \
                 --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
                 "$jar"
               echo "✅ $jar signature verified"
@@ -133,11 +141,11 @@ jobs:
           done
 
           # Verify POM file signature
-          POM_FILE="simulation.util-$VERSION.pom"
+          POM_FILE="$ARTIFACT_ID-$VERSION.pom"
           if [[ -f "${POM_FILE}.sigstore.json" ]]; then
             echo "Verifying $POM_FILE..."
             cosign verify-blob --bundle "${POM_FILE}.sigstore.json" \
-              --certificate-identity-regexp="https://github.com/risquanter/simulation-util/.github/workflows/ci-build.yml@refs/heads/main" \
+              --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/ci-build.yml@refs/heads/main" \
               --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
               "$POM_FILE"
             echo "✅ $POM_FILE signature verified"
@@ -172,7 +180,7 @@ jobs:
           HTTP_CODE=$(curl -sS -o /tmp/upload-response.txt -w '%{http_code}' -X POST \
             -H "Authorization: Bearer ${BEARER_TOKEN}" \
             -F "bundle=@target/maven-central-artifacts.zip" \
-            "https://central.sonatype.com/api/v1/publisher/upload?name=simulation.util-${VERSION}&publishingType=USER_MANAGED")
+            "https://central.sonatype.com/api/v1/publisher/upload?name=${ARTIFACT_ID}-${VERSION}&publishingType=USER_MANAGED")
 
           UPLOAD_RESPONSE=$(cat /tmp/upload-response.txt)
           if [ "$HTTP_CODE" != "201" ]; then

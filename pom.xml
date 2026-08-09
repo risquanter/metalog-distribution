@@ -4,11 +4,11 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.risquanter</groupId>
-    <artifactId>simulation.util</artifactId>
-    <version>0.8.2</version>
+    <artifactId>metalog-distribution</artifactId>
+    <version>0.9.0</version>
     <name>Java Metalog Distribution</name>
     <description>A Java implementation of the Metalog distribution</description>
-    <url>https://github.com/risquanter/java-metalog-distribution</url>
+    <url>https://github.com/risquanter/metalog-distribution</url>
 
     <!-- Required for Maven Central -->
     <licenses>
@@ -35,9 +35,9 @@
     </developers>
 
     <scm>
-        <connection>scm:git:git://github.com/risquanter/java-metalog-distribution.git</connection>
-        <developerConnection>scm:git:ssh://github.com:risquanter/java-metalog-distribution.git</developerConnection>
-        <url>https://github.com/risquanter/java-metalog-distribution/tree/main</url>
+        <connection>scm:git:git://github.com/risquanter/metalog-distribution.git</connection>
+        <developerConnection>scm:git:ssh://github.com:risquanter/metalog-distribution.git</developerConnection>
+        <url>https://github.com/risquanter/metalog-distribution/tree/main</url>
     </scm>
 
     <properties>

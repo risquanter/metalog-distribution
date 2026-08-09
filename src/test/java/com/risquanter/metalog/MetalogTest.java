@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.risquanter.simulation.util.distribution.metalog;
+package com.risquanter.metalog;
 
 
 import org.junit.jupiter.api.Test;
