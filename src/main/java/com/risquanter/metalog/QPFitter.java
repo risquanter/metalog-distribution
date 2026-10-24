@@ -66,6 +66,7 @@ public class QPFitter {
 
   /**
    * Begins a fluent fitting session for the given percentiles and quantiles.
+   * The arrays are copied, so later changes to them do not reach the fit.
    *
    * @param p     the percentiles (must be in (0,1))
    * @param x     the corresponding quantile values
@@ -84,7 +85,8 @@ public class QPFitter {
     /**
      * Sets the floor on the fitted quantile function's derivative at every
      * grid point, which is what makes the fit strictly increasing. Defaults
-     * to 1e-6. It does not affect grid generation.
+     * to 1e-6. It does not affect grid generation. A value that is not
+     * positive is rejected by {@link #fit()}.
      *
      * @param eps the derivative floor, which must be positive
      * @return this builder
@@ -92,10 +94,12 @@ public class QPFitter {
     Options epsilon(double eps);
 
     /**
-     * Sets a custom grid of percentiles for monotonicity constraints.
+     * Sets a custom grid of percentiles for monotonicity constraints. The
+     * array is copied.
      *
      * @param gridP the grid of percentiles
      * @return this builder
+     * @throws IllegalArgumentException if {@code gridP} is null
      */
     Options grid(double[] gridP);
 
@@ -104,6 +108,9 @@ public class QPFitter {
      *
      * @param L the lower bound
      * @return this builder
+     * @throws IllegalArgumentException if {@code L} is not finite, or an upper
+     *                                  bound is already set and {@code L} is
+     *                                  not below it
      */
     Options lower(double L);
 
@@ -112,16 +119,31 @@ public class QPFitter {
      *
      * @param U the upper bound
      * @return this builder
+     * @throws IllegalArgumentException if {@code U} is not finite, or a lower
+     *                                  bound is already set and {@code U} is
+     *                                  not above it
      */
     Options upper(double U);
 
     /**
      * Performs the fit and returns a {@link Metalog} instance.
+     * <p>
+     * The returned quantile function is proved strictly increasing from the
+     * grid's ends to 1e-2 in both tails, and checked at a dense sample of
+     * [1e-2, 1 − 1e-2]: ten thousand uniform points across the grid's span. A
+     * dip in that body narrower than the sampling is not detected. On a
+     * bounded fit, a percentile so extreme that the quantile
+     * rounds onto the bound itself gives a density of {@code Infinity} there,
+     * because the slope in x underflows to zero while the slope in z stays
+     * positive.
      *
      * @return the fitted Metalog distribution
      * @throws IllegalArgumentException    if the inputs are malformed on their
-     *                                     own, including more terms than data
-     *                                     points
+     *                                     own: a percentile outside (0,1),
+     *                                     mismatched or non-finite values,
+     *                                     repeated percentiles, more terms than
+     *                                     data points, a non-positive epsilon,
+     *                                     or a quantile on or outside a bound
      * @throws MetalogInfeasibleException  if no strictly increasing metalog
      *                                     with the requested number of terms
      *                                     fits the quantiles
@@ -136,7 +158,7 @@ public class QPFitter {
     private final int terms;
     private double epsilon = DEFAULT_EPSILON;
     private double[] gridP = null;
-    private Double lower = null, upper = null;
+    private Boundedness bounds = new Boundedness.Unbounded();
 
     Builder(double[] p, double[] x, int terms) {
       this.p = p.clone();
@@ -152,24 +174,41 @@ public class QPFitter {
 
     @Override
     public Options grid(double[] gridP) {
+      if (gridP == null) {
+        throw new IllegalArgumentException("gridP must not be null; omit grid(...) for the default");
+      }
       this.gridP = gridP.clone();
       return this;
     }
 
     @Override
     public Options lower(double L) {
-      this.lower = L;
+      bounds = switch (bounds) {
+        case Boundedness.Unbounded u -> new Boundedness.Lower(L);
+        case Boundedness.Lower l -> new Boundedness.Lower(L);
+        case Boundedness.Upper u -> new Boundedness.Both(L, u.u());
+        case Boundedness.Both b -> new Boundedness.Both(L, b.u());
+      };
       return this;
     }
 
     @Override
     public Options upper(double U) {
-      this.upper = U;
+      bounds = switch (bounds) {
+        case Boundedness.Unbounded u -> new Boundedness.Upper(U);
+        case Boundedness.Lower l -> new Boundedness.Both(l.l(), U);
+        case Boundedness.Upper u -> new Boundedness.Upper(U);
+        case Boundedness.Both b -> new Boundedness.Both(b.l(), U);
+      };
       return this;
     }
 
     @Override
     public Metalog fit() {
+      if (!(epsilon > 0.0)) {
+        throw new IllegalArgumentException("epsilon must be positive, got " + epsilon);
+      }
+
       // 1) default monotonicity grid, uniform on [margin, 1 − margin]
       if (this.gridP == null) {
         this.gridP = IntStream.rangeClosed(0, DEFAULT_GRID_INTERVALS)
@@ -178,33 +217,34 @@ public class QPFitter {
             .toArray();
       }
 
-      // 2) transform x→z
-      Boundedness bounds = Boundedness.of(lower, upper);
+      // 2) transform x→z. The mode is captured by value so that a later
+      // lower()/upper() on this builder does not reach a Metalog already
+      // returned.
+      final Boundedness mode = this.bounds;
       double[] z = new double[x.length];
       for (int i = 0; i < x.length; i++) {
-        if (!bounds.admits(x[i])) {
+        if (!mode.admits(x[i])) {
           throw new IllegalArgumentException(
-              "x[" + i + "] = " + x[i] + " is outside the support of " + bounds);
+              "x[" + i + "] = " + x[i] + " is outside the support of " + mode);
         }
-        z[i] = bounds.toZ(x[i]);
+        z[i] = mode.toZ(x[i]);
       }
 
       // 3) fit an unbounded metalog on (p, z)
       QPUnboundedConstrainedFitter qp = new QPUnboundedConstrainedFitter(
           p, z, terms, epsilon, gridP);
       double[] a = qp.fit();
-      Metalog mZ = new Metalog(a);
 
-      // 4) wrap mZ to invert the transform
+      // 4) wrap the z-space metalog to invert the transform
       return new Metalog(a) {
         @Override
         public double quantile(double p) {
-          return bounds.toX(mZ.quantile(p));
+          return mode.toX(super.quantile(p));
         }
 
         @Override
         double quantileDensity(double p) {
-          return mZ.quantileDensity(p) * bounds.densityScale(quantile(p));
+          return super.quantileDensity(p) * mode.densityScale(quantile(p));
         }
       };
     }

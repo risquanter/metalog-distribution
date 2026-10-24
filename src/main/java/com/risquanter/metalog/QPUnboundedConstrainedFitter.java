@@ -67,6 +67,8 @@ import org.ojalgo.optimisation.Variable;
  * After the solve the slope is checked on a dense sweep of the grid's span.
  * Grid rows only sample the slope, and a fit the data do not admit can dip
  * between them; such a fit is refused with {@link MetalogInfeasibleException}.
+ * In both tails, from the grid's ends to {@link TailCertificate#TAIL_END}, the
+ * slope is then proved positive by {@link TailCertificate} rather than sampled.
  *
  *
  * Putting It All Together
@@ -100,11 +102,17 @@ class QPUnboundedConstrainedFitter {
      */
     private static final int UNIFORM_CHECK_INTERVALS = 10_000;
 
-    /** Multipliers per decade for the post-solve check's tail points. */
-    private static final double[] TAIL_CHECK_MULTIPLIERS = {1.0, 2.0, 5.0};
-
-    /** The largest tail distance the post-solve check samples per decade. */
+    /** The largest distance from an endpoint at which the tail sampling starts. */
     private static final double TAIL_CHECK_START = 1e-2;
+
+    /**
+     * Tail points per decade in the post-solve slope check, spaced evenly in
+     * the logarithm of the distance to the nearer endpoint. Twenty samples
+     * every 0.115 in ln(1/δ); the narrowest far-tail dip a feasible
+     * coefficient vector has been constructed to produce is about 0.15 wide
+     * on that scale.
+     */
+    private static final int TAIL_CHECK_POINTS_PER_DECADE = 20;
 
     private final double[] pData, xData;
     private final int terms;
@@ -132,6 +140,15 @@ class QPUnboundedConstrainedFitter {
     ) {
         if (pData.length != xData.length) {
             throw new IllegalArgumentException("pData and xData must match");
+        }
+        for (int i = 0; i < pData.length; i++) {
+            for (int j = i + 1; j < pData.length; j++) {
+                if (pData[i] == pData[j]) {
+                    throw new IllegalArgumentException(
+                            "pData must be distinct: pData[" + i + "] and pData[" + j
+                                    + "] are both " + pData[i]);
+                }
+            }
         }
         if (terms > pData.length) {
             throw new IllegalArgumentException(
@@ -242,26 +259,39 @@ class QPUnboundedConstrainedFitter {
                         "dQ/dp = " + slope + " at p = " + p);
             }
         }
+
+        // 11) Prove the slope positive in both tails, from the grid's ends to
+        // TailCertificate.TAIL_END, where sampling alone cannot.
+        double lo = Arrays.stream(gridP).min().orElseThrow();
+        double hi = Arrays.stream(gridP).max().orElseThrow();
+        switch (TailCertificate.certify(a, lo, hi)) {
+            case TailCertificate.Verdict.Certified certified -> { }
+            case TailCertificate.Verdict.Refuted r -> throw new MetalogInfeasibleException(n, K,
+                    "dQ/dp = " + r.slope() + " at p = " + r.p());
+            case TailCertificate.Verdict.Uncertified u -> throw new MetalogInfeasibleException(n, K,
+                    "dQ/dp could not be proved positive on [" + u.p0() + ", " + u.p1() + "]");
+        }
         return a;
     }
 
     /**
      * Where the fitted slope is checked after the solve: the span of the
      * constraint grid, sampled uniformly at {@link #UNIFORM_CHECK_INTERVALS}
-     * intervals, plus three points per decade from {@link #TAIL_CHECK_START}
-     * down to the grid's lower end, mirrored at the upper end, where uniform
-     * spacing has no sample at all.
+     * intervals, plus {@link #TAIL_CHECK_POINTS_PER_DECADE} points per decade
+     * from {@link #TAIL_CHECK_START} down to the grid's outermost end,
+     * mirrored at the other end, where uniform spacing has no sample at all.
      */
-    private static double[] verificationGrid(double[] gridP) {
+    static double[] verificationGrid(double[] gridP) {
         double lo = Arrays.stream(gridP).min().orElseThrow();
         double hi = Arrays.stream(gridP).max().orElseThrow();
         TreeSet<Double> points = new TreeSet<>();
         for (int i = 0; i <= UNIFORM_CHECK_INTERVALS; i++) {
             points.add(lo + (hi - lo) * i / (double) UNIFORM_CHECK_INTERVALS);
         }
-        for (double decade = TAIL_CHECK_START; decade >= lo; decade /= 10.0) {
-            for (double m : TAIL_CHECK_MULTIPLIERS) {
-                double p = m * decade;
+        double outermost = Math.min(lo, 1.0 - hi);
+        for (double decade = TAIL_CHECK_START; decade >= outermost; decade /= 10.0) {
+            for (int i = 0; i < TAIL_CHECK_POINTS_PER_DECADE; i++) {
+                double p = decade * Math.pow(10.0, i / (double) TAIL_CHECK_POINTS_PER_DECADE);
                 if (p >= lo) {
                     points.add(p);
                 }

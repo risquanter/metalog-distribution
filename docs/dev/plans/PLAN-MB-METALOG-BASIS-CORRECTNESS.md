@@ -1,6 +1,6 @@
 # Plan: Metalog basis conformance and fit preconditions
 
-**Status:** Approved 2026-10-24, both continuations included; implemented. **Plan code:** `MB`.
+**Status:** Approved 2026-10-24, all four continuations included; implemented. **Plan code:** `MB`.
 
 **Specification reference:** Keelin, T.W. (2016), "The Metalog Distributions",
 *Decision Analysis* 13(4), 243–277, Equation (6), cited by
@@ -574,8 +574,8 @@ package com.risquanter.metalog;
  * with the requested number of terms fits the given quantiles.
  * <p>
  * This is a property of the data and the term count together, not of either
- * alone: the same quantiles usually admit a fit at a lower term count. It is
- * distinct from {@link IllegalArgumentException}, which the fitter throws for
+ * alone: the same quantiles usually admit a fit at a lower term count, or with
+ * a bound. It is distinct from {@link IllegalArgumentException}, which the fitter throws for
  * inputs that are malformed on their own — a percentile outside (0,1),
  * mismatched array lengths, or more terms than data points — and from
  * {@link IllegalStateException}, which it throws when the solver stops before
@@ -679,16 +679,17 @@ And the verification grid, a private static method in the same class:
      * to the grid's lower end, mirrored at the upper end, cover the tails where
      * uniform spacing has no sample at all.
      */
-    private static double[] verificationGrid(double[] gridP) {
+    static double[] verificationGrid(double[] gridP) {
         double lo = Arrays.stream(gridP).min().orElseThrow();
         double hi = Arrays.stream(gridP).max().orElseThrow();
         TreeSet<Double> points = new TreeSet<>();
-        for (int i = 0; i <= UNIFORM_CHECK_POINTS; i++) {
-            points.add(lo + (hi - lo) * i / (double) UNIFORM_CHECK_POINTS);
+        for (int i = 0; i <= UNIFORM_CHECK_INTERVALS; i++) {
+            points.add(lo + (hi - lo) * i / (double) UNIFORM_CHECK_INTERVALS);
         }
-        for (double decade = 1e-2; decade >= lo; decade /= 10.0) {
-            for (double m : new double[] {1.0, 2.0, 5.0}) {
-                double p = m * decade;
+        double outermost = Math.min(lo, 1.0 - hi);
+        for (double decade = TAIL_CHECK_START; decade >= outermost; decade /= 10.0) {
+            for (int i = 0; i < TAIL_CHECK_POINTS_PER_DECADE; i++) {
+                double p = decade * Math.pow(10.0, i / (double) TAIL_CHECK_POINTS_PER_DECADE);
                 if (p >= lo) {
                     points.add(p);
                 }
@@ -700,7 +701,9 @@ And the verification grid, a private static method in the same class:
         return points.stream().mapToDouble(Double::doubleValue).toArray();
     }
 
-    private static final int UNIFORM_CHECK_POINTS = 10_000;
+    private static final int UNIFORM_CHECK_INTERVALS = 10_000;
+    private static final double TAIL_CHECK_START = 1e-2;
+    private static final int TAIL_CHECK_POINTS_PER_DECADE = 20;
 ```
 
 New imports in that file: `org.ojalgo.optimisation.Optimisation`,
@@ -742,21 +745,26 @@ state test uses.
 
 #### 12. `QPFitter.fit` — the grid constant's origin
 
-The comment above the default grid at lines 144–151 becomes:
+The two literals, `G = 100` and `eps = 1e-12`, become named constants in
+`QPFitter`, each carrying its origin in its own javadoc:
 
 ```java
-      // 1) default monotonicity grid: 101 uniform points on [1e-12, 1−1e-12].
-      // The endpoints are where README tells callers to clamp, so the grid
-      // spans everything that can be queried. 101 is as dense as the
-      // active-set solver handles at high term counts — it stalls at 201 with
-      // nine terms — and denser grids do not remove an interior violation of a
-      // fit the data do not admit; the post-solve check in
-      // QPUnboundedConstrainedFitter catches those instead.
-```
+  /**
+   * Intervals in the default monotonicity grid, giving 101 points. 101 is as
+   * dense as the active-set solver handles at high term counts — it stalls at
+   * 201 points with nine terms — and denser grids do not remove an interior
+   * violation of a fit the data do not admit; the post-solve check in
+   * {@link QPUnboundedConstrainedFitter} catches those instead.
+   */
+  private static final int DEFAULT_GRID_INTERVALS = 100;
 
-The two literals, `G = 100` and `eps = 1e-12`, become named constants
-`DEFAULT_GRID_INTERVALS` and `DEFAULT_GRID_MARGIN` in `QPFitter`, carrying that
-comment.
+  /**
+   * Distance of the default grid's endpoints from 0 and 1. README tells
+   * callers to clamp percentiles to this margin, so the grid spans everything
+   * that can be queried.
+   */
+  private static final double DEFAULT_GRID_MARGIN = 1e-12;
+```
 
 ### Tests to add, continuing the numbering in the verification plan
 
@@ -943,6 +951,367 @@ rule at 20 000 intervals, with the central difference for `dx/dp` taken at a
 step of `1e-4` times the distance to the nearer endpoint. The assertion,
 within `1e-3` of one, is the one specified. Ruled: the midpoint rule stands,
 and test 6's text in the verification plan says so.
+
+## Continuation — review findings, 2026-10-24
+
+Approved 2026-10-24 from the complex-tier review report (`docs/dev/reviews/REVIEW-main.md`).
+Every edit is in a file the inventory already lists. One decision, `MB-D-3`, is
+ruled below. The review's finding numbers are kept for cross-reference.
+
+### `MB-D-3` — what the post-solve monotonicity check promises — ruled 2026-10-24
+
+The post-solve sweep samples the slope; a dip narrower than its spacing passes.
+Ruled: Option A, denser tail sampling. The tails are sampled at twenty points per
+decade, spaced evenly in `ln(1/δ)` where `δ` is the distance to the nearer
+endpoint. The narrowest far-tail dip constructed against the previous three
+points per decade was about `0.15` wide in `ln(1/δ)`; twenty per decade samples
+every `0.115`. The promise stays a dense sample, and the javadoc of
+`Options.fit` says so. A certified check is open as a separate question.
+
+### Signatures
+
+#### 17. `Boundedness` — one `admits`, validating constructors, no factory (findings 1, 5b, 6)
+
+```java
+    /** Whether x lies strictly inside the support, where toZ is finite. */
+    default boolean admits(double x) {
+        return Double.isFinite(toZ(x));
+    }
+
+    record Lower(double l) implements Boundedness {
+        Lower {
+            requireFinite(l, "lower");
+        }
+        ...
+    }
+
+    record Upper(double u) implements Boundedness {
+        Upper {
+            requireFinite(u, "upper");
+        }
+        ...
+    }
+
+    record Both(double l, double u) implements Boundedness {
+        Both {
+            requireFinite(l, "lower");
+            requireFinite(u, "upper");
+            if (!(l < u)) {
+                throw new IllegalArgumentException(
+                        "lower bound must be below upper bound: lower=" + l + ", upper=" + u);
+            }
+        }
+        ...
+    }
+
+    private static void requireFinite(double bound, String name) {
+        if (!Double.isFinite(bound)) {
+            throw new IllegalArgumentException(name + " bound must be finite, got " + bound);
+        }
+    }
+```
+
+The four per-record `admits` overrides and `Boundedness.of(Double, Double)` go.
+
+#### 18. `QPFitter.Builder` — the mode advances by `switch`; `epsilon` and `grid` validated; wrapper uses `super` (findings 1, 6, 7, 11)
+
+```java
+    private Boundedness bounds = new Boundedness.Unbounded();
+
+    @Override
+    public Options grid(double[] gridP) {
+      if (gridP == null) {
+        throw new IllegalArgumentException("gridP must not be null; omit grid(...) for the default");
+      }
+      this.gridP = gridP.clone();
+      return this;
+    }
+
+    @Override
+    public Options lower(double L) {
+      bounds = switch (bounds) {
+        case Boundedness.Unbounded u -> new Boundedness.Lower(L);
+        case Boundedness.Lower l -> new Boundedness.Lower(L);
+        case Boundedness.Upper u -> new Boundedness.Both(L, u.u());
+        case Boundedness.Both b -> new Boundedness.Both(L, b.u());
+      };
+      return this;
+    }
+
+    @Override
+    public Options upper(double U) {
+      bounds = switch (bounds) {
+        case Boundedness.Unbounded u -> new Boundedness.Upper(U);
+        case Boundedness.Lower l -> new Boundedness.Both(l.l(), U);
+        case Boundedness.Upper u -> new Boundedness.Upper(U);
+        case Boundedness.Both b -> new Boundedness.Both(b.l(), U);
+      };
+      return this;
+    }
+
+    @Override
+    public Metalog fit() {
+      if (!(epsilon > 0.0)) {
+        throw new IllegalArgumentException("epsilon must be positive, got " + epsilon);
+      }
+      ...
+      final Boundedness mode = this.bounds;   // captured by value, so a later lower()/upper() does not reach a returned Metalog
+      ...
+      return new Metalog(a) {
+        @Override
+        public double quantile(double p) {
+          return mode.toX(super.quantile(p));
+        }
+
+        @Override
+        double quantileDensity(double p) {
+          return super.quantileDensity(p) * mode.densityScale(quantile(p));
+        }
+      };
+    }
+```
+
+The `Double lower, upper` fields and `mZ` go. `Options.lower`/`upper` document
+that a reversed or non-finite bound throws at the setter, because an invalid
+`Both` cannot be constructed. `Options.fit` documents the rounding case
+(finding 5a): on a bounded fit, a percentile so extreme that the quantile
+rounds onto the bound gives a density of `Infinity` there.
+
+#### 19. `QPUnboundedConstrainedFitter` — distinct percentiles; sweep density and symmetry (findings 3, 4; `MB-D-3`)
+
+Added to the six-parameter constructor after the length check:
+
+```java
+        for (int i = 0; i < pData.length; i++) {
+            for (int j = i + 1; j < pData.length; j++) {
+                if (pData[i] == pData[j]) {
+                    throw new IllegalArgumentException(
+                            "pData must be distinct: pData[" + i + "] and pData[" + j
+                                    + "] are both " + pData[i]);
+                }
+            }
+        }
+```
+
+`verificationGrid` is as written in signature 11 above, which now shows the
+twenty-per-decade loop and the `outermost = Math.min(lo, 1.0 − hi)` bound. It
+is package-private so a test can inspect it.
+
+### Tests
+
+16. **`fitterRejectsNonFiniteInput`** — an anchor of `+Infinity` under a lower
+    bound; `lower(−Infinity)`; `lower(NaN)`; `epsilon(−1.0)`; `epsilon(NaN)`.
+    Each throws `IllegalArgumentException`.
+17. **`fitterRejectsRepeatedPercentiles`** — `p = {0.1, 0.1, 0.9}` with three
+    terms throws `IllegalArgumentException` naming indices 0 and 1.
+18. **`gridNullIsRejected`** — `grid(null)` throws `IllegalArgumentException`.
+19. **`verificationGridCoversBothTailsOfAnAsymmetricGrid`** — for a grid on
+    `[0.3, 1 − 1e-12]`, the sweep has a point in `(1 − 1e-11, 1 − 1e-12)`.
+20. **`returnedMetalogIsUnaffectedByLaterBoundChanges`** — `fit()`, then
+    `lower(...)` on the same builder; the first result's quantiles are unchanged.
+21. `MetalogTest.keelinDerivatives` becomes one `switch` (finding 8); no new
+    assertion.
+
+### Documentation
+
+- `README.md` line 28: "with linear monotonicity constraints on the
+  coefficients; bounds are handled by Keelin's transforms of the data". The
+  two `mvn exec:java` commands become the `java -cp` form `CLAUDE.md` gives.
+- `CLAUDE.md`: five source files and two test classes.
+- `Options.fit` javadoc: the sweep is a dense sample; the rounding case.
+
+## Continuation — tail certificate, 2026-10-24
+
+Approved 2026-10-24, signatures included; implemented. The inventory lists the
+new production file and the new test file.
+
+### What it changes in the promise
+
+The post-solve sweep samples the slope. This continuation proves the slope
+positive from the grid's ends to `1e-2` in both tails, where the sampling
+spacing is widest relative to how fast the slope can change. The body
+`[1e-2, 1 − 1e-2]` stays sampled at a spacing of `1e-4`.
+
+### The mathematics
+
+Split every basis derivative by type, with `φ = p − 0.5`,
+`inv = 1/(p(1−p))` and `logit = ln(p/(1−p))`:
+
+```
+logit-bearing  φ^k·logit :  k·φ^(k−1)·logit + φ^k·inv
+pure power     φ^k       :  k·φ^(k−1)
+constant       1         :  0
+```
+
+Collecting terms gives the slope as
+
+```
+s(p) = A(φ)·inv + B(φ)·logit + D(φ),    with B = A′,
+A(φ) = Σ_{logit-bearing j} a_j·φ^k_j
+D(φ) = a₃ + Σ_{even j ≥ 4} a_j·k_j·φ^(k_j − 1)
+```
+
+`A(−½)` and `A(½)` are the tail coefficients `C₀` and `C₁` that the tail rows
+force to be at least `ε`. Differentiating once more, using `inv′ = 2φ·inv²`
+and `logit′ = inv`:
+
+```
+s′(p) = 2·B(φ)·inv + 2·φ·A(φ)·inv² + B′(φ)·logit + D′(φ)
+```
+
+For a polynomial `P` in `φ` with coefficients `c_i`, `sup |P|` on `[−½, ½]` is
+at most `‖P‖ = Σ |c_i|·0.5^i`. On a sub-interval of width `w`,
+`|P| ≤ max(|P(φ₀)|, |P(φ₁)|) + ‖P″‖·w²/8`, which is the linear-interpolation
+error bound.
+
+**Method 1 — a threshold below which the slope is positive.** In the lower
+tail, for `p ≤ q`: `A(φ) ≥ C₀ − ‖B‖·p` because `A′ = B`; `|B(φ)| ≤ ‖B‖`;
+`|D(φ)| ≤ ‖D‖`; and `|logit(p)| ≤ ln(1/p)`. So `s(p) > 0` wherever
+
+```
+h(p) = ‖B‖·p + p(1−p)·(‖B‖·ln(1/p) + ‖D‖)  <  C₀
+```
+
+`h` increases on `(0, 1e-2]` and tends to zero, so the largest `q* ≤ 1e-2`
+with `h(q*) < C₀` certifies all of `(0, q*]`. The upper tail mirrors it with
+`q = 1 − p` and `C₁`. `q*` is found by bisection on `ln q`.
+
+**Method 2 — an interval certificate between `q*` and `1e-2`.** On an interval
+`[p₀, p₁]`, `inv`, `|logit|` and `|φ|` take their maxima at an endpoint,
+because each is convex or monotone there. Bounding each factor of `s′` that way
+gives `|s′| ≤ L` on the interval, and then
+
+```
+s(p) ≥ (s(p₀) + s(p₁) − L·(p₁ − p₀)) / 2      for every p in [p₀, p₁]
+```
+
+An interval is accepted when that is positive. Otherwise it is refuted if an
+endpoint slope is at most zero, and split at its geometric midpoint if not.
+Splitting stops at depth 60 or after 200 000 intervals in total.
+
+**Measured on the prototype.** The review's constructed vector is refuted at
+`p = 0.9999965`. Every fit in the test suite is certified, within 1.4 ms. Of
+3 000 vectors built like the review's, all 1 317 with a real tail dip were
+refuted and all 1 683 without one were certified.
+
+### Signatures
+
+#### 20. `TailCertificate` — new file, package-private
+
+`src/main/java/com/risquanter/metalog/TailCertificate.java`
+
+```java
+final class TailCertificate {
+
+    /** Where the certified tails end and the sampled body begins. */
+    static final double TAIL_END = 1e-2;
+
+    /**
+     * Relative margin by which h(q) must stay below the tail coefficient, so
+     * rounding in evaluating the closed forms cannot turn a bound into a
+     * false certificate.
+     */
+    private static final double ROUNDING_MARGIN = 1e-9;
+
+    /** Bisection depth at which an interval that is still not certified is reported. */
+    private static final int MAX_DEPTH = 60;
+
+    /** Total intervals examined across both tails before certification stops. */
+    private static final int INTERVAL_BUDGET = 200_000;
+
+    private TailCertificate() {
+    }
+
+    /** The outcome of certifying both tails of one coefficient vector. */
+    sealed interface Verdict {
+        /** dQ/dp > 0 is proved on both tails. */
+        record Certified() implements Verdict { }
+
+        /** dQ/dp ≤ 0 at {@code p}. */
+        record Refuted(double p, double slope) implements Verdict { }
+
+        /**
+         * dQ/dp is positive at every point evaluated in {@code [p0, p1]} but
+         * could not be proved positive throughout it within the depth or budget.
+         */
+        record Uncertified(double p0, double p1) implements Verdict { }
+    }
+
+    /**
+     * Certifies dQ/dp > 0 on {@code [lo, TAIL_END]} and {@code [1 − TAIL_END, hi]}
+     * for the metalog with coefficients {@code a}.
+     */
+    static Verdict certify(double[] a, double lo, double hi);
+
+    /** Method 1: the largest q ≤ TAIL_END such that dQ/dp > 0 on (0, q] at the given tail; 0 if none. */
+    static double threshold(double[] a, Metalog.Tail tail);
+
+    /** A(φ), as coefficients of ascending powers of φ. */
+    static double[] tailPolynomial(double[] a);
+
+    /** D(φ), as coefficients of ascending powers of φ. */
+    static double[] purePowerPolynomial(double[] a);
+}
+```
+
+The private helpers are not part of the signature set: polynomial evaluation,
+derivative, `‖P‖`, the interval bound, and the bisection loop.
+
+#### 21. `QPUnboundedConstrainedFitter.fit` — step 11
+
+After the post-solve sweep, before `return a`:
+
+```java
+        // 11) Prove the slope positive in both tails, from the grid's ends to
+        // TailCertificate.TAIL_END, where sampling alone cannot.
+        double lo = Arrays.stream(gridP).min().orElseThrow();
+        double hi = Arrays.stream(gridP).max().orElseThrow();
+        switch (TailCertificate.certify(a, lo, hi)) {
+            case TailCertificate.Verdict.Certified certified -> { }
+            case TailCertificate.Verdict.Refuted r -> throw new MetalogInfeasibleException(n, K,
+                    "dQ/dp = " + r.slope() + " at p = " + r.p());
+            case TailCertificate.Verdict.Uncertified u -> throw new MetalogInfeasibleException(n, K,
+                    "dQ/dp could not be proved positive on [" + u.p0() + ", " + u.p1() + "]");
+        }
+```
+
+An uncertified interval is refused with `MetalogInfeasibleException`. It means
+the slope there is positive at every evaluated point and within rounding of
+zero after 60 halvings. Such a fit is not strictly increasing at any
+resolution the library can vouch for. This is a derived choice, flagged
+reversible.
+
+#### 22. `Options.fit` and `MetalogInfeasibleException` javadoc
+
+`Options.fit`: the quantile function is proved strictly increasing from the
+grid's ends to `1e-2` in both tails, and checked at a dense sample of
+`[1e-2, 1 − 1e-2]`. `MetalogInfeasibleException`: also thrown when the slope
+cannot be proved positive on part of a tail.
+
+### Tests
+
+New file `src/test/java/com/risquanter/metalog/TailCertificateTest.java`:
+
+22. **`refutesTheReviewVector`** — `a = {0, 0.5 + e^(−12.6), −1, 10.599}`
+    gives `Refuted` with `p` in the upper tail.
+23. **`certifiesEveryFitInTheSuite`** — the README triplet in all four modes,
+    the nine observations at four and nine terms, and the five heavy-tail
+    anchors lower-bounded at 0: each `Certified`.
+24. **`neverCertifiesAConstructedDip`** — 500 seeded vectors from the family
+    `a = {0, ε − a₂/2, a₂, c₃}`. Each is scanned at 2 400 log-spaced points per
+    tail. A vector the scan finds negative is never `Certified`, and a
+    `Certified` vector's scan minimum is positive.
+25. **`thresholdIsSound`** — for 500 seeded random vectors with positive tail
+    coefficients, the slope is positive at 1 000 log-spaced points in
+    `(1e-12, threshold]` in each tail.
+
+### Inventory amendment
+
+```
+docs/dev/plans/PLAN-MB-METALOG-BASIS-CORRECTNESS.md
+new: src/main/java/com/risquanter/metalog/TailCertificate.java
+new: src/test/java/com/risquanter/metalog/TailCertificateTest.java
+```
 
 ## Verification plan
 

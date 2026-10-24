@@ -25,7 +25,7 @@ The basic metalog functionality (basis functions for quantile expansion) as defi
 - `Metalog` — quantile and PDF evaluation
 - `QPFitter` — fits a Metalog distribution via quadratic programming (QP) using the Ojalgo library
 
-The implementation follows the referenced paper for quantile and PDF evaluation. However, instead of ordinary least squares (OLS), fitting uses a quadratic programming (QP) approach with convex feasibility constraints (such as monotonicity and bounds) on the coefficients. This is motivated by Keelin's proof that the set of feasible Metalog coefficients is convex, making convex optimization (QP) both robust and theoretically justified for Metalog fitting.
+The implementation follows the referenced paper for quantile and PDF evaluation. However, instead of ordinary least squares (OLS), fitting uses a quadratic programming (QP) approach with linear monotonicity constraints on the coefficients; bounds are handled by Keelin's transforms of the data. This is motivated by Keelin's proof that the set of feasible Metalog coefficients is convex, making convex optimization (QP) both robust and theoretically justified for Metalog fitting.
 
 ## Usage
 
@@ -89,9 +89,10 @@ Various examples under `src/test/java/com/risquanter/examples` demonstrate fitti
 
 1. Clone the repository
 2. Build: `mvn clean install`
-3. Run an example from the command line:
+3. Run an example from the command line, with the two runtime jars from your local Maven repository on the classpath:
    ```bash
-   mvn exec:java -Dexec.mainClass="com.risquanter.examples.ExpertOpinionDemo1"
+   CP="target/classes:target/test-classes:$HOME/.m2/repository/org/apache/commons/commons-math3/3.6.1/commons-math3-3.6.1.jar:$HOME/.m2/repository/org/ojalgo/ojalgo/56.0.0/ojalgo-56.0.0.jar"
+   java -cp "$CP" com.risquanter.examples.ExpertOpinionDemo1
    ```
 
 > **Note:**
@@ -100,7 +101,7 @@ Various examples under `src/test/java/com/risquanter/examples` demonstrate fitti
 > ```bash
 > mvn clean test
 > ```
-> This will compile the test classes, allowing you to run the examples with `mvn exec:java -Dexec.mainClass="..."` as shown above.
+> This will compile the test classes, allowing you to run the examples with the `java -cp` command shown above.
 
 ## Release verification
 

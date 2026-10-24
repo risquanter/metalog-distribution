@@ -19,3 +19,5 @@ Only the user writes this file, through `.claude/bin/approve-inventory`.
 - README.md
 - FINDING-basis-function-indexing.md
 - src/main/java/com/risquanter/metalog/MetalogInfeasibleException.java
+- src/main/java/com/risquanter/metalog/TailCertificate.java
+- src/test/java/com/risquanter/metalog/TailCertificateTest.java

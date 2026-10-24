@@ -161,6 +161,57 @@ class QPFitterTest {
     }
 
     @Test
+    void fitterRejectsNonFiniteInput() {
+        double[] infiniteAnchor = {TRIPLET_X[0], TRIPLET_X[1], Double.POSITIVE_INFINITY};
+        assertThrows(IllegalArgumentException.class,
+                () -> QPFitter.with(TRIPLET_P, infiniteAnchor, 3).lower(TRIPLET_LOWER).fit());
+        assertThrows(IllegalArgumentException.class,
+                () -> QPFitter.with(TRIPLET_P, TRIPLET_X, 3).lower(Double.NEGATIVE_INFINITY));
+        IllegalArgumentException nanBound = assertThrows(IllegalArgumentException.class,
+                () -> QPFitter.with(TRIPLET_P, TRIPLET_X, 3).lower(Double.NaN));
+        assertTrue(nanBound.getMessage().contains("lower bound"), nanBound.getMessage());
+        assertThrows(IllegalArgumentException.class,
+                () -> QPFitter.with(TRIPLET_P, TRIPLET_X, 3).epsilon(-1.0).fit());
+        assertThrows(IllegalArgumentException.class,
+                () -> QPFitter.with(TRIPLET_P, TRIPLET_X, 3).epsilon(Double.NaN).fit());
+    }
+
+    @Test
+    void fitterRejectsRepeatedPercentiles() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> QPFitter.with(new double[] {0.1, 0.1, 0.9}, new double[] {1, 1, 5}, 3).fit());
+        assertTrue(e.getMessage().contains("pData[0]") && e.getMessage().contains("pData[1]"),
+                e.getMessage());
+    }
+
+    @Test
+    void gridNullIsRejected() {
+        assertThrows(IllegalArgumentException.class,
+                () -> QPFitter.with(TRIPLET_P, TRIPLET_X, 3).grid(null));
+    }
+
+    @Test
+    void verificationGridCoversBothTailsOfAnAsymmetricGrid() {
+        double[] asymmetric = IntStream.rangeClosed(0, GRID_INTERVALS)
+                .mapToDouble(i -> 0.3 + (1.0 - MARGIN - 0.3) * i / (double) GRID_INTERVALS)
+                .toArray();
+        double[] sweep = QPUnboundedConstrainedFitter.verificationGrid(asymmetric);
+        boolean upperTailSampled = Arrays.stream(sweep)
+                .anyMatch(p -> p > 1.0 - 1e-11 && p < 1.0 - MARGIN);
+        assertTrue(upperTailSampled, "no sweep point between 1 - 1e-11 and the grid's upper end");
+    }
+
+    @Test
+    void returnedMetalogIsUnaffectedByLaterBoundChanges() {
+        QPFitter.Options options = QPFitter.with(TRIPLET_P, TRIPLET_X, 3);
+        Metalog unbounded = options.fit();
+        double[] before = Arrays.stream(INTERIOR_P).map(unbounded::quantile).toArray();
+        options.lower(TRIPLET_LOWER).fit();
+        double[] after = Arrays.stream(INTERIOR_P).map(unbounded::quantile).toArray();
+        assertArrayEquals(before, after, 0.0);
+    }
+
+    @Test
     void boundedFitDensityIntegratesToOne() {
         MODES.forEach((name, mode) -> {
             Metalog m = mode.apply(QPFitter.with(TRIPLET_P, TRIPLET_X, 3)).fit();

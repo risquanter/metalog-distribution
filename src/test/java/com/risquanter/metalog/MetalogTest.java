@@ -98,20 +98,18 @@ class MetalogTest {
         double inv = 1.0 / (p * (1.0 - p));
         double[] d = new double[terms];
         for (int j = 0; j < terms; j++) {
-            if (j <= 3) {
-                d[j] = switch (j) {
-                    case 0 -> 0.0;
-                    case 1 -> inv;
-                    case 2 -> logit + φ * inv;
-                    default -> 1.0;
-                };
-            } else if (j % 2 == 0) {
-                int k = j / 2;
-                d[j] = k * Math.pow(φ, k - 1);
-            } else {
-                int k = (j - 1) / 2;
-                d[j] = k * Math.pow(φ, k - 1) * logit + Math.pow(φ, k) * inv;
-            }
+            d[j] = switch (j) {
+                case 0 -> 0.0;
+                case 1 -> inv;
+                case 2 -> logit + φ * inv;
+                case 3 -> 1.0;
+                default -> {
+                    int k = (j % 2 == 0) ? j / 2 : (j - 1) / 2;
+                    yield (j % 2 == 0)
+                            ? k * Math.pow(φ, k - 1)
+                            : k * Math.pow(φ, k - 1) * logit + Math.pow(φ, k) * inv;
+                }
+            };
         }
         return d;
     }

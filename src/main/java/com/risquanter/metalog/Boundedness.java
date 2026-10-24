@@ -21,7 +21,9 @@ package com.risquanter.metalog;
  * is fitted to.
  * <p>
  * Every transform is strictly increasing, so a metalog that is strictly
- * increasing in {@code z} is strictly increasing in {@code x}.
+ * increasing in {@code z} is strictly increasing in {@code x}. A record with a
+ * bound cannot be constructed with a non-finite bound, and {@link Both} cannot
+ * be constructed with its lower bound at or above its upper bound.
  */
 sealed interface Boundedness {
 
@@ -38,14 +40,12 @@ sealed interface Boundedness {
     double densityScale(double x);
 
     /** Whether x lies strictly inside the support, where toZ is finite. */
-    boolean admits(double x);
+    default boolean admits(double x) {
+        return Double.isFinite(toZ(x));
+    }
 
     /** z = x. */
     record Unbounded() implements Boundedness {
-        public boolean admits(double x) {
-            return Double.isFinite(x);
-        }
-
         public double toZ(double x) {
             return x;
         }
@@ -61,8 +61,8 @@ sealed interface Boundedness {
 
     /** z = ln(x − l). */
     record Lower(double l) implements Boundedness {
-        public boolean admits(double x) {
-            return x > l;
+        public Lower {
+            requireFinite(l, "lower");
         }
 
         public double toZ(double x) {
@@ -80,8 +80,8 @@ sealed interface Boundedness {
 
     /** z = −ln(u − x). */
     record Upper(double u) implements Boundedness {
-        public boolean admits(double x) {
-            return x < u;
+        public Upper {
+            requireFinite(u, "upper");
         }
 
         public double toZ(double x) {
@@ -99,8 +99,13 @@ sealed interface Boundedness {
 
     /** z = logit((x − l)/(u − l)). */
     record Both(double l, double u) implements Boundedness {
-        public boolean admits(double x) {
-            return x > l && x < u;
+        public Both {
+            requireFinite(l, "lower");
+            requireFinite(u, "upper");
+            if (!(l < u)) {
+                throw new IllegalArgumentException(
+                        "lower bound must be below upper bound: lower=" + l + ", upper=" + u);
+            }
         }
 
         public double toZ(double x) {
@@ -117,27 +122,9 @@ sealed interface Boundedness {
         }
     }
 
-    /**
-     * Selects the mode the two optional bounds describe.
-     *
-     * @throws IllegalArgumentException if both bounds are given and the lower
-     *                                  one is not below the upper one
-     */
-    static Boundedness of(Double lower, Double upper) {
-        if (lower != null && upper != null) {
-            if (!(lower < upper)) {
-                throw new IllegalArgumentException(
-                        "lower bound must be below upper bound: lower=" + lower
-                                + ", upper=" + upper);
-            }
-            return new Both(lower, upper);
+    private static void requireFinite(double bound, String name) {
+        if (!Double.isFinite(bound)) {
+            throw new IllegalArgumentException(name + " bound must be finite, got " + bound);
         }
-        if (lower != null) {
-            return new Lower(lower);
-        }
-        if (upper != null) {
-            return new Upper(upper);
-        }
-        return new Unbounded();
     }
 }

@@ -6,8 +6,8 @@ Guidance for Claude Code when working in this repository.
 
 A Java 21 implementation of Keelin's metalog distribution: basis functions,
 quantile and density evaluation, and a quadratic-programming fitter with
-monotonicity constraints. Three source files under
-`src/main/java/com/risquanter/metalog/`, one test class, four runnable
+monotonicity constraints. Six source files under
+`src/main/java/com/risquanter/metalog/`, three test classes, four runnable
 examples under `src/test/java/com/risquanter/examples/`. Published to Maven
 Central as `com.risquanter:metalog-distribution`.
 

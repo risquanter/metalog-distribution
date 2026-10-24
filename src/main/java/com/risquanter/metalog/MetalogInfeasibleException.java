@@ -17,7 +17,8 @@ package com.risquanter.metalog;
 
 /**
  * Thrown by {@link QPFitter.Options#fit()} when no strictly increasing metalog
- * with the requested number of terms fits the given quantiles.
+ * with the requested number of terms fits the given quantiles, or when the
+ * fit's slope cannot be proved positive on part of a tail.
  * <p>
  * This is a property of the data and the term count together, not of either
  * alone: the same quantiles usually admit a fit at a lower term count, or with
