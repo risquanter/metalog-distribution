@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mvn clean test)",
+      "Bash(mvn -o clean test)",
+      "Bash(mvn clean install)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/protocol-gate.sh\"",
+            "timeout": 10,
+            "statusMessage": "Working-protocol gate"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/protocol-gate.sh\"",
+            "timeout": 10,
+            "statusMessage": "Working-protocol gate"
+          }
+        ]
+      }
+    ]
+  }
+}
