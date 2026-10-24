@@ -39,6 +39,14 @@ import org.apache.commons.math3.util.FastMath;
  * Available at: https://doi.org/10.1287/deca.2016.0338
  */
 public class Metalog {
+    /**
+     * Upper bound on the number of terms. Chosen by this library, not fixed by
+     * Keelin (2016): the paper gives three to five terms for expert
+     * elicitation and eight to twelve for data exploration, and no maximum.
+     * Twenty leaves headroom above both while keeping the highest power of
+     * {@code p − 0.5}, whose magnitude falls off as {@code 0.5^(terms/2)},
+     * within a range where the least-squares normal matrix stays workable.
+     */
     private static final int MAX_TERMS = 20;
 
     private final double[] a; // coefficients a₀…a_{terms-1}
@@ -84,23 +92,35 @@ public class Metalog {
     }
 
     /**
-     * Evaluates the probability density function (PDF) at a given percentile
-     * {@code p}.
+     * Evaluates the probability density function (PDF) at the quantile of a
+     * given percentile {@code p}: the density of the distribution at
+     * {@code quantile(p)}, which is the reciprocal of the quantile function's
+     * slope there.
      *
      * @param p the percentile in (0,1)
-     * @return the PDF value at {@code p}
+     * @return the PDF value at {@code quantile(p)}
      * @throws IllegalArgumentException if {@code p} is outside (0,1)
      */
     public double pdf(double p) {
-        if (p <= 0.0 || p >= 1.0) {
-            throw new IllegalArgumentException("p must be in (0,1), got " + p);
-        }
+        return 1.0 / quantileDensity(p);
+    }
+
+    /**
+     * The derivative of the quantile function, {@code dQ/dp}, at {@code p}.
+     * The density of the distribution at {@code quantile(p)} is its reciprocal.
+     *
+     * @param p the percentile in (0,1)
+     * @return the slope of the quantile function at {@code p}
+     * @throws IllegalArgumentException if {@code p} is outside (0,1)
+     */
+    double quantileDensity(double p) {
+        validateInputs(p);
         double[] dT = basisDerivatives(p, terms);
         double dMdp = 0.0;
         for (int j = 0; j < terms; j++) {
             dMdp += a[j] * dT[j];
         }
-        return 1.0 / dMdp;
+        return dMdp;
     }
 
     /**
@@ -127,19 +147,25 @@ public class Metalog {
             T[1] = logit;
         }
 
-        // T2 = φ * logit(p) ← special case for first “power×logit”
+        // T2 = φ · logit(p)
         if (terms > 2) {
             T[2] = φ * logit;
         }
 
-        // j ≥ 3: even = φ^(j/2), odd = φ^((j-1)/2) * logit
-        for (int j = 3; j < terms; j++) {
+        // T3 = φ. Keelin's n = 4 term is the one index that carries a power of
+        // φ without a logit factor, so it sits outside the alternation below.
+        if (terms > 3) {
+            T[3] = φ;
+        }
+
+        // j ≥ 4: even = φ^(j/2), odd = φ^((j-1)/2) * logit
+        for (int j = 4; j < terms; j++) {
             if ((j & 1) == 0) {
                 // even j ≥ 4: pure power
                 int power = j / 2;
                 T[j] = FastMath.pow(φ, power);
             } else {
-                // odd j ≥ 3: power × logit
+                // odd j ≥ 5: power × logit
                 int power = (j - 1) / 2;
                 T[j] = FastMath.pow(φ, power) * logit;
             }
@@ -177,15 +203,20 @@ public class Metalog {
             d[2] = logit + φ * inv;
         }
 
-        // j ≥ 3: even = d/dp[φ^(j/2)] ; odd = d/dp[φ^((j-1)/2)*logit]
-        for (int j = 3; j < terms; j++) {
+        // dT3/dp = derivative of φ = 1
+        if (terms > 3) {
+            d[3] = 1.0;
+        }
+
+        // j ≥ 4: even = d/dp[φ^(j/2)] ; odd = d/dp[φ^((j-1)/2)*logit]
+        for (int j = 4; j < terms; j++) {
             if ((j & 1) == 0) {
                 // even j ≥ 4
                 int power = j / 2;
                 // derivative of φ^power = power * φ^(power-1)
                 d[j] = power * FastMath.pow(φ, power - 1);
             } else {
-                // odd j ≥ 3
+                // odd j ≥ 5
                 int power = (j - 1) / 2;
                 double φk = FastMath.pow(φ, power);
                 double φkm1 = FastMath.pow(φ, power - 1);
@@ -194,6 +225,50 @@ public class Metalog {
             }
         }
         return d;
+    }
+
+    /** The two ends of the unit interval, each with its value of φ = p − 0.5. */
+    enum Tail {
+        LOWER(-0.5),
+        UPPER(0.5);
+
+        final double φ;
+
+        Tail(double φ) {
+            this.φ = φ;
+        }
+    }
+
+    /**
+     * The weight each basis derivative puts on {@code 1 / (p·(1−p))} at one end
+     * of the unit interval.
+     * <p>
+     * A logit-bearing basis function {@code φ^k · logit(p)} has derivative
+     * {@code k·φ^(k−1)·logit(p) + φ^k / (p·(1−p))}. The second part grows
+     * without bound at both ends and every other part of every basis derivative
+     * grows no faster than {@code logit}, so next to an endpoint the sign of the
+     * quantile function's slope is the sign of {@code Σ a_j·w_j} with {@code w}
+     * the array returned here, provided that sum is not zero. Pure-power basis
+     * functions contribute zero.
+     *
+     * @param terms the number of terms
+     * @param tail  which end of the interval
+     * @return one weight per basis function
+     * @throws IllegalArgumentException if {@code terms} is invalid
+     */
+    static double[] basisTailWeights(int terms, Tail tail) {
+        validateInputs(terms);
+        double[] w = new double[terms];
+        if (terms > 1) {
+            w[1] = 1.0;
+        }
+        if (terms > 2) {
+            w[2] = tail.φ;
+        }
+        for (int j = 5; j < terms; j += 2) {
+            w[j] = FastMath.pow(tail.φ, (j - 1) / 2);
+        }
+        return w;
     }
 
     /**

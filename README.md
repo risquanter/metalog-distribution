@@ -12,7 +12,7 @@ The key advantage is that it enables precise, simulation-based quantitative risk
 <dependency>
   <groupId>com.risquanter</groupId>
   <artifactId>metalog-distribution</artifactId>
-  <version>0.9.0</version>
+  <version>0.10.0</version>
 </dependency>
 ```
 
@@ -51,6 +51,8 @@ Metalog metalogBounded = QPFitter
     .upper(upperBound)
     .fit();
 ```
+
+`fit()` throws `MetalogInfeasibleException` when no strictly increasing metalog with the requested number of terms fits the quantiles. For loss data the first remedy is a lower bound of zero, and the second is fewer terms. It throws `IllegalArgumentException` for malformed input, including more terms than quantiles, a quantile on or outside a bound, and a lower bound not below the upper bound, and `IllegalStateException` if the solver stops before reaching an optimum.
 
 ### Generating a quantile trace
 

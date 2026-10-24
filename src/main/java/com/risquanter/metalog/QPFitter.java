@@ -30,13 +30,32 @@ import java.util.stream.IntStream;
  * <li>Fully-bounded: z = logit((x − L)/(U − L))</li>
  * </ul>
  * <p>
- * The resulting Metalog is wrapped to invert the transform at query time.
- * Internally always solves a pure monotonicity-only QP on z, then wraps
- * the raw unbounded Metalog to invert the transform in quantile(p).
+ * Internally always solves a monotonicity-constrained QP on z, then wraps the
+ * fitted unbounded Metalog so that {@code quantile(p)} inverts the transform
+ * and {@code pdf(p)} returns the density of x.
  *
  * @author Daniel Agota &lt;danago@risquanter.com&gt;
  */
 public class QPFitter {
+
+  /**
+   * Intervals in the default monotonicity grid, giving 101 points. 101 is as
+   * dense as the active-set solver handles at high term counts — it stalls at
+   * 201 points with nine terms — and denser grids do not remove an interior
+   * violation of a fit the data do not admit; the post-solve check in
+   * {@link QPUnboundedConstrainedFitter} catches those instead.
+   */
+  private static final int DEFAULT_GRID_INTERVALS = 100;
+
+  /**
+   * Distance of the default grid's endpoints from 0 and 1. README tells
+   * callers to clamp percentiles to this margin, so the grid spans everything
+   * that can be queried.
+   */
+  private static final double DEFAULT_GRID_MARGIN = 1e-12;
+
+  /** Default floor on the fitted quantile function's slope at grid points. */
+  private static final double DEFAULT_EPSILON = 1e-6;
 
   /**
    * Private constructor to prevent direct instantiation.
@@ -63,9 +82,11 @@ public class QPFitter {
   public interface Options {
 
     /**
-     * Sets the epsilon used for grid generation and numerical stability.
+     * Sets the floor on the fitted quantile function's derivative at every
+     * grid point, which is what makes the fit strictly increasing. Defaults
+     * to 1e-6. It does not affect grid generation.
      *
-     * @param eps the epsilon value
+     * @param eps the derivative floor, which must be positive
      * @return this builder
      */
     Options epsilon(double eps);
@@ -98,6 +119,14 @@ public class QPFitter {
      * Performs the fit and returns a {@link Metalog} instance.
      *
      * @return the fitted Metalog distribution
+     * @throws IllegalArgumentException    if the inputs are malformed on their
+     *                                     own, including more terms than data
+     *                                     points
+     * @throws MetalogInfeasibleException  if no strictly increasing metalog
+     *                                     with the requested number of terms
+     *                                     fits the quantiles
+     * @throws IllegalStateException       if the solver stops before reaching
+     *                                     an optimum
      */
     Metalog fit();
   }
@@ -105,13 +134,13 @@ public class QPFitter {
   private static class Builder implements Options {
     private final double[] p, x;
     private final int terms;
-    private double epsilon = 1e-6;
+    private double epsilon = DEFAULT_EPSILON;
     private double[] gridP = null;
     private Double lower = null, upper = null;
 
     Builder(double[] p, double[] x, int terms) {
-      this.p = p;
-      this.x = x;
+      this.p = p.clone();
+      this.x = x.clone();
       this.terms = terms;
     }
 
@@ -123,7 +152,7 @@ public class QPFitter {
 
     @Override
     public Options grid(double[] gridP) {
-      this.gridP = gridP;
+      this.gridP = gridP.clone();
       return this;
     }
 
@@ -141,35 +170,23 @@ public class QPFitter {
 
     @Override
     public Metalog fit() {
-      // 1) build default gridP on [ε … 1−ε]
+      // 1) default monotonicity grid, uniform on [margin, 1 − margin]
       if (this.gridP == null) {
-        int G = 100;
-        double eps = 1e-12;
-        this.gridP = IntStream.rangeClosed(0, G)
-            .mapToDouble(i -> eps + (1 - 2 * eps) * i / (double) G)
+        this.gridP = IntStream.rangeClosed(0, DEFAULT_GRID_INTERVALS)
+            .mapToDouble(i -> DEFAULT_GRID_MARGIN
+                + (1 - 2 * DEFAULT_GRID_MARGIN) * i / (double) DEFAULT_GRID_INTERVALS)
             .toArray();
       }
 
       // 2) transform x→z
+      Boundedness bounds = Boundedness.of(lower, upper);
       double[] z = new double[x.length];
-      if (lower != null && upper != null) {
-        double L = lower, U = upper, span = U - L;
-        for (int i = 0; i < x.length; i++) {
-          double y = (x[i] - L) / span;
-          z[i] = Math.log(y / (1 - y)); // logit
+      for (int i = 0; i < x.length; i++) {
+        if (!bounds.admits(x[i])) {
+          throw new IllegalArgumentException(
+              "x[" + i + "] = " + x[i] + " is outside the support of " + bounds);
         }
-      } else if (lower != null) {
-        double L = lower;
-        for (int i = 0; i < x.length; i++) {
-          z[i] = Math.log(x[i] - L);
-        }
-      } else if (upper != null) {
-        double U = upper;
-        for (int i = 0; i < x.length; i++) {
-          z[i] = -Math.log(U - x[i]);
-        }
-      } else {
-        System.arraycopy(x, 0, z, 0, x.length);
+        z[i] = bounds.toZ(x[i]);
       }
 
       // 3) fit an unbounded metalog on (p, z)
@@ -182,18 +199,12 @@ public class QPFitter {
       return new Metalog(a) {
         @Override
         public double quantile(double p) {
-          double zz = mZ.quantile(p);
-          if (lower != null && upper != null) {
-            double L = lower, U = upper;
-            double frac = 1.0 / (1.0 + Math.exp(-zz)); // logistic
-            return L + frac * (U - L);
-          } else if (lower != null) {
-            return lower + Math.exp(zz);
-          } else if (upper != null) {
-            return upper - Math.exp(-zz);
-          } else {
-            return zz;
-          }
+          return bounds.toX(mZ.quantile(p));
+        }
+
+        @Override
+        double quantileDensity(double p) {
+          return mZ.quantileDensity(p) * bounds.densityScale(quantile(p));
         }
       };
     }

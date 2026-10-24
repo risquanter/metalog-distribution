@@ -49,8 +49,11 @@ public class ObservationalMetalogFitExample {
         String outputFilename = "vega-lite-observational.json";
 
         // 1) Raw observations (n = 9)
-        //TODO: values marked with (!) for further testing, as they cause numerical instability
-        //double[] observations = { 78, 65, 82, 90, 120 /* ! */, 160, 143 /* ! */, /* 127 ,*/ 110, 85 };
+        // Two alternative observation sets. The first fits at four and at nine
+        // terms. The second repeats the value 85, so the nine-term fit, which
+        // passes through every point, would need a zero slope between the two
+        // and is refused with MetalogInfeasibleException.
+        //double[] observations = { 78, 65, 82, 90, 120, 160, 143, 110, 85 };
         //double[] observations = { 78, 65, 82, 85,  160, 143 ,  127 , 110, 85 };
         double[] observations = { 78, 65, 82, 90, 160, 143, 127, 110, 85 };
         int n = observations.length;
@@ -66,7 +69,7 @@ public class ObservationalMetalogFitExample {
             pValues[i] = (i + 0.5) / n; // Hazen plotting positions
         }
 
-        // 3) Fit a metalog to 9 data points with 5 terms and 9 terms (exact fit)
+        // 3) Fit a metalog to 9 data points with four terms and nine terms (exact fit)
         // (more terms = more flexible, but also more complexity / chance for overfitting)
         int terms = 4;
 

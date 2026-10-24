@@ -15,8 +15,12 @@
  */
 package com.risquanter.metalog;
 
+import java.util.Arrays;
+import java.util.TreeSet;
+
 import org.ojalgo.optimisation.ExpressionsBasedModel;
 import org.ojalgo.optimisation.Expression;
+import org.ojalgo.optimisation.Optimisation;
 import org.ojalgo.optimisation.Variable;
 
 
@@ -30,14 +34,15 @@ import org.ojalgo.optimisation.Variable;
  *
  * Q(p) = Σ_{j=0..n-1} a_j · T_j(p)
  *
- * where the T_j are the “metalog” basis polynomials in the probability p.
- * Common choices (n≥3) include:
+ * where the T_j are the metalog basis functions, following Keelin (2016)
+ * Eqn (6). Writing φ for (p − 0.5):
  * T₀(p) = 1
  * T₁(p) = logit(p) = ln(p/(1−p))
- * T₂(p) = (p − 0.5)·logit(p)
- * T₃(p) = (p − 0.5)^2
- * T₄(p) = (p − 0.5)^2·logit(p)
- * …and higher-order combinations for added flexibility.
+ * T₂(p) = φ·logit(p)
+ * T₃(p) = φ
+ * T₄(p) = φ²
+ * T₅(p) = φ²·logit(p)
+ * …thereafter alternating φ^k and φ^k·logit(p) for ascending k.
  *
  *
  * Monotonicity Constraint (dQ/dp ≥ ε)
@@ -52,25 +57,60 @@ import org.ojalgo.optimisation.Variable;
  *
  * D[k]·a ≥ ε, D[k,j] = Tʹ_j(pₖ)
  *
+ * Two more rows require the slope to be positive next to each end of the
+ * unit interval, using the leading coefficient of dQ/dp there
+ * ({@link Metalog#basisTailWeights}). Grid rows near the endpoints carry
+ * coefficients of order 1/(p·(1−p)), up to 1e12, which the solver honours only
+ * to relative precision; the tail rows state the same condition with
+ * coefficients in [−1, 1].
+ *
+ * After the solve the slope is checked on a dense sweep of the grid's span.
+ * Grid rows only sample the slope, and a fit the data do not admit can dip
+ * between them; such a fit is refused with {@link MetalogInfeasibleException}.
+ *
  *
  * Putting It All Together
  * -----------------------
  * The QP solved is:
  *
  * minimize ½‖Y·a − xData‖² (least-squares fit at data points)
- * subject to D·a ≥ ε (monotonicity)
+ * subject to D·a ≥ ε (monotonicity on the grid)
+ *            W·a ≥ ε (monotonicity in both tails)
  *
  * where:
  * • Y[i,j] = T_j(pData[i]) (basis at your observed quantiles)
  * • D[k,j] = Tʹ_j(gridP[k]) (derivatives on the enforce grid)
+ * • W[t,j] = the tail weight of T_j at tail t
  *
  * No lower or upper bound constraints are applied in the unbounded version.
  */
 class QPUnboundedConstrainedFitter {
+    /**
+     * The solver's own default iteration limit, read from ojAlgo 56.0.0's
+     * {@code Optimisation.Options}. Passing it leaves the solver's behaviour
+     * exactly as it is without the parameter.
+     */
+    private static final int SOLVER_DEFAULT_ITERATION_LIMIT = Integer.MAX_VALUE;
+
+    /**
+     * Uniform points in the post-solve slope check. 10 000 intervals resolve an
+     * interior dip a hundredth of the interval wide with a hundred samples,
+     * which is the narrowest dip a fit the data do not admit has been seen to
+     * produce.
+     */
+    private static final int UNIFORM_CHECK_INTERVALS = 10_000;
+
+    /** Multipliers per decade for the post-solve check's tail points. */
+    private static final double[] TAIL_CHECK_MULTIPLIERS = {1.0, 2.0, 5.0};
+
+    /** The largest tail distance the post-solve check samples per decade. */
+    private static final double TAIL_CHECK_START = 1e-2;
+
     private final double[] pData, xData;
     private final int terms;
     private final double epsilon;
     private final double[] gridP;
+    private final int iterationLimit;
 
     QPUnboundedConstrainedFitter(
         double[] pData,
@@ -79,8 +119,24 @@ class QPUnboundedConstrainedFitter {
         double epsilon,
         double[] gridP
     ) {
+        this(pData, xData, terms, epsilon, gridP, SOLVER_DEFAULT_ITERATION_LIMIT);
+    }
+
+    QPUnboundedConstrainedFitter(
+        double[] pData,
+        double[] xData,
+        int terms,
+        double epsilon,
+        double[] gridP,
+        int iterationLimit
+    ) {
         if (pData.length != xData.length) {
             throw new IllegalArgumentException("pData and xData must match");
+        }
+        if (terms > pData.length) {
+            throw new IllegalArgumentException(
+                    "terms must not exceed the number of data points: terms="
+                            + terms + ", data points=" + pData.length);
         }
         Metalog.validateInputs(terms);
         Metalog.validateInputs(gridP);
@@ -89,6 +145,7 @@ class QPUnboundedConstrainedFitter {
         this.terms   = terms;
         this.epsilon = epsilon;
         this.gridP   = gridP.clone();
+        this.iterationLimit = iterationLimit;
     }
 
     double[] fit() {
@@ -137,7 +194,7 @@ class QPUnboundedConstrainedFitter {
             }
         }
 
-        // 6) Monotonicity: D·a ≥ ε
+        // 6) Monotonicity on the grid: D·a ≥ ε
         for (int k = 0; k < G; k++) {
             Expression con = model.addExpression("mono_" + k).lower(epsilon);
             for (int j = 0; j < n; j++) {
@@ -145,14 +202,74 @@ class QPUnboundedConstrainedFitter {
             }
         }
 
-        // 7) Solve
-        model.minimise();
+        // 7) Monotonicity in the tails: the leading term of dQ/dp at each end
+        // must be positive. Grid rows cannot say this — at the endpoints their
+        // coefficients reach 1e12 and the solver honours them only to relative
+        // precision — so it is said exactly, with coefficients in [−1, 1].
+        for (Metalog.Tail tail : Metalog.Tail.values()) {
+            Expression con = model.addExpression("tail_" + tail).lower(epsilon);
+            double[] w = Metalog.basisTailWeights(n, tail);
+            for (int j = 0; j < n; j++) {
+                con.set(vars[j], w[j]);
+            }
+        }
 
-        // 8) Return coefficients
+        // 8) Solve, and refuse a result the solver does not vouch for. A
+        // non-optimal state says the solver stopped early, not that the data
+        // admit no fit, so it is reported as a library-side failure.
+        model.options.iterations_abort = iterationLimit;
+        Optimisation.Result result = model.minimise();
+        if (!result.getState().isOptimal()) {
+            throw new IllegalStateException(
+                    "the solver stopped before reaching an optimum: state "
+                            + result.getState() + ", terms=" + n
+                            + ", data points=" + K);
+        }
+
+        // 9) Coefficients
         double[] a = new double[n];
         for (int j = 0; j < n; j++) {
             a[j] = vars[j].getValue().doubleValue();
         }
+
+        // 10) The grid rows only sample the slope; check it where the caller
+        // can query, which is the span of the grid.
+        Metalog fitted = new Metalog(a);
+        for (double p : verificationGrid(gridP)) {
+            double slope = fitted.quantileDensity(p);
+            if (slope <= 0.0) {
+                throw new MetalogInfeasibleException(n, K,
+                        "dQ/dp = " + slope + " at p = " + p);
+            }
+        }
         return a;
+    }
+
+    /**
+     * Where the fitted slope is checked after the solve: the span of the
+     * constraint grid, sampled uniformly at {@link #UNIFORM_CHECK_INTERVALS}
+     * intervals, plus three points per decade from {@link #TAIL_CHECK_START}
+     * down to the grid's lower end, mirrored at the upper end, where uniform
+     * spacing has no sample at all.
+     */
+    private static double[] verificationGrid(double[] gridP) {
+        double lo = Arrays.stream(gridP).min().orElseThrow();
+        double hi = Arrays.stream(gridP).max().orElseThrow();
+        TreeSet<Double> points = new TreeSet<>();
+        for (int i = 0; i <= UNIFORM_CHECK_INTERVALS; i++) {
+            points.add(lo + (hi - lo) * i / (double) UNIFORM_CHECK_INTERVALS);
+        }
+        for (double decade = TAIL_CHECK_START; decade >= lo; decade /= 10.0) {
+            for (double m : TAIL_CHECK_MULTIPLIERS) {
+                double p = m * decade;
+                if (p >= lo) {
+                    points.add(p);
+                }
+                if (1.0 - p <= hi) {
+                    points.add(1.0 - p);
+                }
+            }
+        }
+        return points.stream().mapToDouble(Double::doubleValue).toArray();
     }
 }
