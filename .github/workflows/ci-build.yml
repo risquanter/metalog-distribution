@@ -115,9 +115,9 @@ jobs:
           cp target/$ARTIFACT_ID-$VERSION-sources.jar.sigstore.json "$DEST/"
           cp target/$ARTIFACT_ID-$VERSION-javadoc.jar.sigstore.json "$DEST/"
 
-          # Copy POM and its signatures. Decision 6A: the pom signature is
-          # required, not optional — a missing .asc fails the build here, where
-          # the problem starts, instead of shipping an unsigned pom downstream.
+          # Copy POM and its signatures. Both signature files are required: a
+          # missing one fails the build here, where the problem starts, instead
+          # of shipping an unsigned pom downstream.
           cp pom.xml "$DEST/$ARTIFACT_ID-$VERSION.pom"
           cp target/$ARTIFACT_ID-$VERSION.pom.asc "$DEST/$ARTIFACT_ID-$VERSION.pom.asc"
           cp target/$ARTIFACT_ID-$VERSION.pom.sigstore.json "$DEST/"
@@ -148,10 +148,10 @@ jobs:
           PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
         run: |
           set -euo pipefail
-          # Decision 7B: the SLSA provenance attestation travels to Maven Central
-          # next to the jar so a consumer can verify it offline against our
-          # pinned workflow identity (cosign verify-blob-attestation
-          # --new-bundle-format --type slsaprovenance). The real .sigstore.json
+          # The SLSA provenance attestation travels to Maven Central next to
+          # the jar so a consumer can verify it offline against our pinned
+          # workflow identity (cosign verify-blob-attestation
+          # --new-bundle-format --type slsaprovenance). The .sigstore.json
           # signatures come from the Maven signing plugin; this attestation is a
           # separate SLSA statement about how the build ran.
           if [ ! -f "$PROVENANCE_BUNDLE" ]; then
