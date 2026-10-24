@@ -5,5 +5,8 @@
     "files.trimTrailingWhitespace": true,
     "files.trimFinalNewlines": true,
     "files.insertFinalNewline": true,
-    "files.autoSave": "off"
+    "files.autoSave": "off",
+    "files.watcherExclude": {
+        "**/target/**": true
+    }
 }
