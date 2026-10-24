@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  attestations: write
 
 env:
   # The only lines that differ between risquanter Maven repos:
@@ -18,10 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: '21'
@@ -114,18 +115,12 @@ jobs:
           cp target/$ARTIFACT_ID-$VERSION-sources.jar.sigstore.json "$DEST/"
           cp target/$ARTIFACT_ID-$VERSION-javadoc.jar.sigstore.json "$DEST/"
 
-          # Copy POM and signature with proper naming
+          # Copy POM and its signatures. Decision 6A: the pom signature is
+          # required, not optional — a missing .asc fails the build here, where
+          # the problem starts, instead of shipping an unsigned pom downstream.
           cp pom.xml "$DEST/$ARTIFACT_ID-$VERSION.pom"
-
-          # Copy POM signature if it exists (plugin signing)
-          if [[ -f target/$ARTIFACT_ID-$VERSION.pom.asc ]]; then
-            cp target/$ARTIFACT_ID-$VERSION.pom.asc "$DEST/$ARTIFACT_ID-$VERSION.pom.asc"
-          fi
-
-          # Copy POM sigstore file if it exists
-          if [[ -f target/$ARTIFACT_ID-$VERSION.pom.sigstore.json ]]; then
-            cp target/$ARTIFACT_ID-$VERSION.pom.sigstore.json "$DEST/"
-          fi
+          cp target/$ARTIFACT_ID-$VERSION.pom.asc "$DEST/$ARTIFACT_ID-$VERSION.pom.asc"
+          cp target/$ARTIFACT_ID-$VERSION.pom.sigstore.json "$DEST/"
 
           # Generate checksums for Maven Central
           cd "$DEST"
@@ -135,62 +130,50 @@ jobs:
           done
           cd -
 
-          # Create deployment bundle ZIP
+          # Hand the layout to later steps (provenance placement, zip).
+          {
+            echo "VERSION=$VERSION"
+            echo "BUNDLE_DIR=$BUNDLE_DIR"
+            echo "DEST=$DEST"
+          } >> "$GITHUB_ENV"
+
+      - name: Generate SLSA build provenance
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: 'target/${{ env.ARTIFACT_ID }}-${{ env.VERSION }}.jar'
+
+      - name: Ship provenance next to the jar
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          # Decision 7B: the SLSA provenance attestation travels to Maven Central
+          # next to the jar so a consumer can verify it offline against our
+          # pinned workflow identity (cosign verify-blob-attestation
+          # --new-bundle-format --type slsaprovenance). The real .sigstore.json
+          # signatures come from the Maven signing plugin; this attestation is a
+          # separate SLSA statement about how the build ran.
+          if [ ! -f "$PROVENANCE_BUNDLE" ]; then
+            echo "❌ Attestation bundle not found at $PROVENANCE_BUNDLE"
+            exit 1
+          fi
+          cp "$PROVENANCE_BUNDLE" "$DEST/$ARTIFACT_ID-$VERSION.jar.intoto.jsonl"
+          echo "provenance shipped: $DEST/$ARTIFACT_ID-$VERSION.jar.intoto.jsonl"
+
+      - name: Create deployment bundle ZIP
+        run: |
+          set -euo pipefail
           cd "$BUNDLE_DIR"
           zip -r "../maven-central-artifacts.zip" .
           cd ..
-
-          # Also create simple artifacts for Sigstore signing
-          mkdir -p out
-          cp target/$ARTIFACT_ID-*.jar out/
-          cp pom.xml out/
-          cd out
-          sha256sum *.jar pom.xml > checksums.sha256
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v4.0.0
-
-      - name: Sign artifacts with Sigstore
-        env:
-          COSIGN_EXPERIMENTAL: 1
-        run: |
-          # Sign each artifact and generate provenance
-          cd out
-          for file in *.jar; do
-            # Generate signature file with certificate bundle
-            cosign sign-blob --yes --bundle "${file}.bundle" "$file"
-            # Extract signature and certificate
-            jq -r '.Sig' "${file}.bundle" > "${file}.sig"
-            jq -r '.Cert' "${file}.bundle" > "${file}.cert"
-
-            # Generate SLSA provenance with blob signing (attestation)
-            echo '{"buildType": "https://github.com/actions/runner","builder": {"id": "GitHub Actions"}}' | \
-            cosign sign-blob --yes --bundle "${file}.attest.bundle" -
-          done
-
-          # Sign pom.xml and generate bundle + extracted sig/cert
-          cosign sign-blob --yes --bundle "pom.xml.bundle" "pom.xml"
-          jq -r '.Sig' "pom.xml.bundle" > "pom.xml.sig"
-          jq -r '.Cert' "pom.xml.bundle" > "pom.xml.cert"
-          # Optionally produce an attest bundle for the pom as well
-          echo '{"buildType": "https://github.com/actions/runner","builder": {"id": "GitHub Actions"}}' | \
-            cosign sign-blob --yes --bundle "pom.xml.attest.bundle" -
-
-          # Package provenance files (include pom-related provenance)
-          tar czf provenance.tgz *.sig *.cert *.bundle
+          unzip -l maven-central-artifacts.zip
 
       - name: Upload Maven deployment bundle
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: deployment-${{ github.run_id }}
           path: maven-central-artifacts.zip
-          retention-days: 7
-
-      - name: Upload provenance
-        uses: actions/upload-artifact@v5
-        with:
-          name: provenance-${{ github.run_id }}
-          path: out/provenance.tgz
           retention-days: 7
 
       - name: Cleanup GPG
@@ -204,7 +187,6 @@ jobs:
           pkill -u "$(id -u)" gpg-agent 2>/dev/null || true
 
           rm -rf maven_bundle 2>/dev/null
-          rm -rf out 2>/dev/null
           rm -f maven-central-artifacts.zip 2>/dev/null
 
           echo "✅ Cleanup completed"

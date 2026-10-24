@@ -76,7 +76,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
 
@@ -89,10 +89,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh run download ${{ inputs.run_id }} \
-            --name deployment-${{ inputs.run_id }} \
+          set -euo pipefail
+          if ! [[ "$ARTIFACT_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "❌ run_id must be a numeric run ID, got: $ARTIFACT_RUN_ID"
+            exit 1
+          fi
+          gh run download "$ARTIFACT_RUN_ID" \
+            --name "deployment-$ARTIFACT_RUN_ID" \
             --dir /tmp/maven-release \
-            --repo ${{ github.repository }}
+            --repo "$GITHUB_REPOSITORY"
 
       - name: Extract and verify artifacts
         run: |
@@ -111,7 +116,7 @@ jobs:
           ls -la "$JAR_PATH"
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4.0.0
+        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
 
       - name: Verify Sigstore signatures
         env:
@@ -124,13 +129,19 @@ jobs:
 
           echo "Verifying Sigstore signatures..."
 
+          # Exact identity match, identical to register's consumer-side pin: a
+          # build from any other branch/workflow/repo is rejected here, not only
+          # later by register. The GPG (.asc) signatures are not verified here;
+          # Maven Central's keyserver validation is the effective GPG control,
+          # and this Sigstore identity check is the binary-authenticity control.
+
           # Verify each JAR file against its Sigstore signature
           cd "$JAR_PATH"
           for jar in $ARTIFACT_ID-*.jar; do
             if [[ -f "${jar}.sigstore.json" ]]; then
               echo "Verifying $jar..."
               cosign verify-blob --bundle "${jar}.sigstore.json" \
-                --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/ci-build.yml@refs/heads/main" \
+                --certificate-identity="https://github.com/${{ github.repository }}/.github/workflows/ci-build.yml@refs/heads/main" \
                 --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
                 "$jar"
               echo "✅ $jar signature verified"
@@ -145,7 +156,7 @@ jobs:
           if [[ -f "${POM_FILE}.sigstore.json" ]]; then
             echo "Verifying $POM_FILE..."
             cosign verify-blob --bundle "${POM_FILE}.sigstore.json" \
-              --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/ci-build.yml@refs/heads/main" \
+              --certificate-identity="https://github.com/${{ github.repository }}/.github/workflows/ci-build.yml@refs/heads/main" \
               --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
               "$POM_FILE"
             echo "✅ $POM_FILE signature verified"
@@ -206,27 +217,49 @@ jobs:
           echo "Deployment status: $STATUS_RESPONSE"
           echo "✅ Deployment completed (staged). Visit https://central.sonatype.com/ to publish."
 
-      - name: Create Git tag and GitHub release
+      - name: Verify signed release tag and create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
+          if ! [[ "$ARTIFACT_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "❌ run_id must be a numeric run ID, got: $ARTIFACT_RUN_ID"
+            exit 1
+          fi
+
           VERSION=$(xmlstarlet sel -t -v "/_:project/_:version" pom.xml)
           TAG_NAME="v$VERSION"
 
-          echo "Creating tag: $TAG_NAME"
+          # The maintainer creates and pushes the signed tag locally with their
+          # hardware SSH key before dispatching this release. CI never creates
+          # the tag; it verifies that the human-signed tag anchors the exact
+          # commit the ci-build run was built from, then publishes. A full CI +
+          # org-secret compromise cannot forge this tag.
+          git config gpg.ssh.allowedSignersFile "$GITHUB_WORKSPACE/.github/allowed_signers"
 
-          # Create and push git tag
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG_NAME" -m "Release version $VERSION"
-          git push origin "$TAG_NAME"
+          # Commit the ci-build run was built from.
+          RUN_SHA=$(gh run view "$ARTIFACT_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headSha -q .headSha)
+          if [ -z "$RUN_SHA" ]; then
+            echo "❌ Could not resolve head SHA for run $ARTIFACT_RUN_ID"
+            exit 1
+          fi
 
-          # Create GitHub release
+          # Fetch the pushed tag and confirm it points at that exact commit.
+          git fetch --force origin "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
+          TAG_SHA=$(git rev-list -n1 "$TAG_NAME")
+          if [ "$TAG_SHA" != "$RUN_SHA" ]; then
+            echo "❌ Tag $TAG_NAME points at $TAG_SHA but run $ARTIFACT_RUN_ID was built from $RUN_SHA"
+            exit 1
+          fi
+
+          # Verify the tag signature against the committed allowed_signers file.
+          git tag -v "$TAG_NAME"
+          echo "✅ Signed tag $TAG_NAME verified and anchors run $ARTIFACT_RUN_ID"
+
           gh release create "$TAG_NAME" \
             --title "Release $VERSION" \
-            --notes "Release $VERSION deployed to Maven Central" \
+            --notes "Release $VERSION deployed to Maven Central (staged)" \
             --verify-tag
 
       - name: Clean up
