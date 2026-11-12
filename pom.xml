@@ -5,7 +5,7 @@
 
     <groupId>com.risquanter</groupId>
     <artifactId>metalog-distribution</artifactId>
-    <version>X.Y.Z</version>
+    <version>0.10.1</version>
     <name>Java Metalog Distribution</name>
     <description>A Java implementation of the Metalog distribution</description>
     <url>https://github.com/risquanter/metalog-distribution</url>

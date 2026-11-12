@@ -12,7 +12,7 @@ How metalog-distribution is built, verified, and published to Maven Central.
 |---|---|---|
 | `pr-build.yml` ("PR build") | pull requests to main | Tests only. References no secrets, so runs from fork PRs are safe by construction. |
 | `ci-build.yml` ("CI Build + Sigstore provenance") | push to main | Tests, then stages a Maven-layout bundle, GPG-signs and Sigstore-signs every jar and pom, and uploads the zipped bundle as the run artifact `deployment-<run id>`. Each run's ID identifies a releasable bundle. |
-| `release.yml` ("Release") | manual dispatch | Two jobs. `verify-authorization` checks the supplied TOTP code against the org secret (60-second period, YubiKey OATH credential) with the runner's preinstalled `python3`, accepting the current window and the two before it. `sign-and-publish` (gated on the first job, runs in the `release` environment restricted to main) reads the version from `pom.xml` and refuses a SNAPSHOT, then checks that the named run is a successful ci-build run and that the tag `v<version>` points at the commit it built and carries a signature from `.github/allowed_signers`. Only then does it download the bundle, verify every jar's and the pom's Sigstore signature against ci-build's OIDC identity on main, upload to the Central Portal as a staged `USER_MANAGED` deployment, and create the GitHub release on the existing tag. It never creates the tag. |
+| `release.yml` ("Release") | manual dispatch | Two jobs. `verify-authorization` checks the supplied TOTP code against the org secret (60-second period, YubiKey OATH credential) with the runner's preinstalled `python3`, accepting the current window and the two before it. `sign-and-publish` (gated on the first job, runs in the `release` environment restricted to main) reads the version from `pom.xml` and refuses any version that is not `MAJOR.MINOR.PATCH` digits, then checks that the named run is a successful ci-build run and that the tag `v<version>` points at the commit it built and carries a signature from `.github/allowed_signers`. Only then does it download the bundle, verify every jar's and the pom's Sigstore signature against ci-build's OIDC identity on main, upload to the Central Portal as a staged `USER_MANAGED` deployment, and create the GitHub release on the existing tag. It never creates the tag. |
 
 No human-triggered run builds the artifacts it publishes: `release.yml` only
 republishes what `ci-build.yml` built and signed on main, and PR runs never
@@ -47,41 +47,52 @@ Prerequisites on the maintainer's machine:
 **1. Set the version, commit with a signature, push to main.**
 
 ```bash
-sed -i '0,/<version>[^<]*<\/version>/s//<version>X.Y.Z<\/version>/' pom.xml README.md
+read -rp "Version to release: " VERSION
+sed -i "0,/<version>[^<]*<\/version>/s//<version>$VERSION<\/version>/" pom.xml README.md
+git diff pom.xml README.md
 git add pom.xml README.md    # and the release's other files
-git commit -S -m "…"
+git commit -S -m "release $VERSION"
 git push
 ```
 
-The `sed` replaces the first `<version>` in each file: the project version in
-`pom.xml`, and the installation snippet in `README.md` that mirrors it. The
-version must not be a SNAPSHOT. On `main` with upstream `origin/main`,
+`read` asks for the version, for example `0.10.1`. The `sed` writes it into
+the first `<version>` of each file: the project version in `pom.xml`, and the
+installation snippet in `README.md` that mirrors it. `git diff` shows both
+lines before anything is committed. The version must not be a SNAPSHOT. On `main` with upstream `origin/main`,
 `git push` pushes `main` to `origin`.
 
 **2. Wait for the ci-build run of that push, and read the commit it built.**
 
 ```bash
-RUN_ID=$(gh run list --workflow ci-build.yml --branch main --limit 1 --json databaseId -q '.[0].databaseId')
+HEAD_SHA=$(git rev-parse HEAD)
+RUN_ID=$(gh run list --workflow ci-build.yml --commit "$HEAD_SHA" --limit 1 --json databaseId -q '.[0].databaseId')
+echo "run ${RUN_ID:-<none yet>} builds $HEAD_SHA"
 gh run watch "$RUN_ID" --exit-status
-HEAD_SHA=$(gh run view "$RUN_ID" --json headSha -q .headSha)
-echo "run $RUN_ID built $HEAD_SHA"
 ```
 
-`--exit-status` makes the watch fail when the run fails, and a failed run is
-not released. The printed commit is the one step 1 pushed.
+`--commit` selects the run of the commit step 1 pushed, so an older run is
+never picked up. If the echo prints `<none yet>`, the run has not started:
+wait a few seconds and repeat the block. `--exit-status` makes the watch fail
+when the run fails, and a failed run is not released.
 
 **3. Sign the release tag on exactly that commit, check it, push it.**
 
 ```bash
-VERSION=$(sed -n '0,/<version>/s#.*<version>\(.*\)</version>.*#\1#p' pom.xml)
-git tag -s "v$VERSION" "$HEAD_SHA" -m "v$VERSION"
-git tag -v "v$VERSION"
-git push origin "v$VERSION"
+VERSION=$(git show "$HEAD_SHA:pom.xml" | sed -n '0,/<version>/s#.*<version>\(.*\)</version>.*#\1#p')
+if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  git tag -s "v$VERSION" "$HEAD_SHA" -m "v$VERSION" &&
+  git tag -v "v$VERSION" &&
+  git push origin "v$VERSION"
+else
+  echo "not a release version: $VERSION"
+fi
 ```
 
-The YubiKey asks for a touch. `release.yml` refuses a tag that is unsigned,
-that is signed by a key outside `.github/allowed_signers`, or that points at any
-other commit.
+The version is read from the pom of the commit being tagged, not from the
+working tree. Nothing is tagged unless that version is three dot-separated
+numbers, such as `0.10.1`. The YubiKey asks for a touch. `release.yml` refuses
+a tag that is unsigned, that is signed by a key outside
+`.github/allowed_signers`, or that points at any other commit.
 
 **4. Dispatch the release with a fresh TOTP code, and watch it.**
 

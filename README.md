@@ -12,7 +12,7 @@ The key advantage is that it enables precise, simulation-based quantitative risk
 <dependency>
   <groupId>com.risquanter</groupId>
   <artifactId>metalog-distribution</artifactId>
-  <version>X.Y.Z</version>
+  <version>0.10.1</version>
 </dependency>
 ```
 
