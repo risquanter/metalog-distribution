@@ -146,6 +146,7 @@ jobs:
       - name: Ship provenance next to the jar
         env:
           PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
           # The SLSA provenance attestation travels to Maven Central next to
@@ -158,8 +159,19 @@ jobs:
             echo "❌ Attestation bundle not found at $PROVENANCE_BUNDLE"
             exit 1
           fi
-          cp "$PROVENANCE_BUNDLE" "$DEST/$ARTIFACT_ID-$VERSION.jar.intoto.jsonl"
-          echo "provenance shipped: $DEST/$ARTIFACT_ID-$VERSION.jar.intoto.jsonl"
+          PROVENANCE_FILE="$DEST/$ARTIFACT_ID-$VERSION.jar.intoto.jsonl"
+          cp "$PROVENANCE_BUNDLE" "$PROVENANCE_FILE"
+
+          # Central requires a GPG signature, an md5 and a sha1 beside every
+          # bundle file except .sigstore.json bundles, and .intoto.jsonl is not
+          # exempt. The Maven signing plugin never sees this file, so it is
+          # signed here with the key imported earlier in this job.
+          printf '%s' "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback \
+            --passphrase-fd 0 --local-user "$GPG_KEYID" \
+            --armor --detach-sign --output "$PROVENANCE_FILE.asc" "$PROVENANCE_FILE"
+          md5sum "$PROVENANCE_FILE" | awk '{print $1}' > "$PROVENANCE_FILE.md5"
+          sha1sum "$PROVENANCE_FILE" | awk '{print $1}' > "$PROVENANCE_FILE.sha1"
+          echo "provenance shipped: $PROVENANCE_FILE (+ .asc, .md5, .sha1)"
 
       - name: Create deployment bundle ZIP
         run: |
