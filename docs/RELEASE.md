@@ -43,22 +43,26 @@ Prerequisites on the maintainer's machine:
   `user.signingkey` names the key. Its public half is a signing key on the
   GitHub account and a line in `.github/allowed_signers`.
 - `ykman` reaches the YubiKey.
+- `xmlstarlet` is installed.
 
 **1. Set the version, commit with a signature, push to main.**
 
+First edit the project `<version>` in `pom.xml` to the release version, for
+example `0.10.1`. Then:
+
 ```bash
-read -rp "Version to release: " VERSION
-sed -i "0,/<version>[^<]*<\/version>/s//<version>$VERSION<\/version>/" pom.xml README.md
+VERSION=$(xmlstarlet sel -t -v "/_:project/_:version" pom.xml)
+sed -i "0,/<version>[^<]*<\/version>/s//<version>$VERSION<\/version>/" README.md
 git diff pom.xml README.md
-git add pom.xml README.md    # and the release's other files
+git add pom.xml README.md
 git commit -S -m "release $VERSION"
 git push
 ```
 
-`read` asks for the version, for example `0.10.1`. The `sed` writes it into
-the first `<version>` of each file: the project version in `pom.xml`, and the
-installation snippet in `README.md` that mirrors it. `git diff` shows both
-lines before anything is committed. The version must not be a SNAPSHOT. On `main` with upstream `origin/main`,
+`xmlstarlet` reads the project version from `pom.xml`, the same way
+`release.yml` does. The `sed` copies it into the installation snippet in
+`README.md`. `git diff` shows both changed lines. Add the release's other files
+to `git add` if there are any. On `main` with upstream `origin/main`,
 `git push` pushes `main` to `origin`.
 
 **2. Wait for the ci-build run of that push, and read the commit it built.**
@@ -78,7 +82,7 @@ when the run fails, and a failed run is not released.
 **3. Sign the release tag on exactly that commit, check it, push it.**
 
 ```bash
-VERSION=$(git show "$HEAD_SHA:pom.xml" | sed -n '0,/<version>/s#.*<version>\(.*\)</version>.*#\1#p')
+VERSION=$(git show "$HEAD_SHA:pom.xml" | xmlstarlet sel -t -v "/_:project/_:version" -)
 if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   git tag -s "v$VERSION" "$HEAD_SHA" -m "v$VERSION" &&
   git tag -v "v$VERSION" &&
