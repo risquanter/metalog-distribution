@@ -4,11 +4,15 @@
 # Trust model (shared across risquanter repos):
 #   1. verify-authorization gates the run on a TOTP code
 #      (60-second period, YubiKey OATH credential).
-#   2. sign-and-publish downloads the bundle built by a trusted
-#      ci-build.yml run, verifies every artifact's Sigstore
-#      signature against that workflow's OIDC identity, and only
-#      then uploads to the Central Portal (staged, USER_MANAGED —
-#      publishing requires a manual click in the portal).
+#   2. sign-and-publish then gates on the human-signed release tag:
+#      it verifies the SSH-signed tag anchors the exact commit a
+#      successful ci-build run was built from, before any bundle is
+#      downloaded or uploaded — so a CI or org-secret compromise
+#      cannot stage a release the maintainer did not sign.
+#   3. It verifies every artifact's Sigstore signature against the
+#      ci-build.yml OIDC identity, then uploads to the Central Portal
+#      (staged, USER_MANAGED — publishing requires a manual click in
+#      the portal), and finally creates the GitHub release.
 #
 # Required org-level secrets:
 #   - TOTP_ORG:                       Base32 secret for TOTP verification
@@ -44,9 +48,10 @@ jobs:
   verify-authorization:
     runs-on: ubuntu-latest
     steps:
-      - name: Install oathtool
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y oathtool
-
+      # TOTP is verified with preinstalled python3 (RFC 6238: HMAC-SHA1, 6
+      # digits, base32 secret, 60s step — oathtool's defaults). Nothing is
+      # installed first, so verification runs seconds after the runner boots
+      # and the code cannot age out of its window before it is checked.
       - name: Verify TOTP
         env:
           TOTP_SECRET: ${{ secrets.TOTP_ORG }}
@@ -54,13 +59,28 @@ jobs:
         run: |
           set -euo pipefail
           date --utc
-          EXPECTED=$(oathtool --totp --base32 --time-step-size 60 "$TOTP_SECRET")
-          if [ "${INPUT_TOTP}" != "$EXPECTED" ]; then
-            echo "❌ Invalid TOTP code"
-            exit 1
-          fi
-          echo "✅ TOTP verified successfully"
+          python3 - <<'PY'
+          import base64, hashlib, hmac, os, struct, sys, time
 
+          key = base64.b32decode(os.environ["TOTP_SECRET"].strip().replace(" ", "").upper())
+          provided = os.environ["INPUT_TOTP"].strip()
+          STEP = 60
+
+          def totp(counter: int) -> str:
+              digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+              offset = digest[-1] & 0x0F
+              code = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1_000_000
+              return f"{code:06d}"
+
+          counter = int(time.time()) // STEP
+          # Accept the current 60s window and the two prior ones so that runner
+          # startup and dispatch latency cannot reject an otherwise-valid code.
+          if any(hmac.compare_digest(provided, totp(counter - back)) for back in (0, 1, 2)):
+              print("✅ TOTP verified successfully")
+          else:
+              print("❌ Invalid TOTP code")
+              sys.exit(1)
+          PY
 
   sign-and-publish:
     needs: verify-authorization
@@ -84,6 +104,64 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq tar gpg xmlstarlet
+
+      - name: Verify signed release tag anchors the ci-build run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$ARTIFACT_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "❌ run_id must be a numeric run ID, got: $ARTIFACT_RUN_ID"
+            exit 1
+          fi
+
+          VERSION=$(xmlstarlet sel -t -v "/_:project/_:version" pom.xml)
+          case "$VERSION" in
+            *SNAPSHOT*) echo "❌ Refusing to release SNAPSHOT version $VERSION"; exit 1 ;;
+          esac
+          TAG_NAME="v$VERSION"
+
+          # The maintainer creates and pushes the signed tag locally with their
+          # hardware SSH key before dispatching this release. CI never creates
+          # the tag; it verifies that the human-signed tag anchors the exact
+          # commit the ci-build run was built from, and gates the whole release
+          # on that check before any bundle is downloaded or uploaded. A full CI
+          # + org-secret compromise cannot forge this tag.
+          git config gpg.ssh.allowedSignersFile "$GITHUB_WORKSPACE/.github/allowed_signers"
+
+          # Resolve the run, and confirm it is a successful CI Build run before
+          # trusting its head SHA. The Sigstore identity check later pins the
+          # artifacts to ci-build.yml@main; this pins the run itself.
+          RUN_JSON=$(gh run view "$ARTIFACT_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --json headSha,conclusion,workflowName)
+          RUN_SHA=$(echo "$RUN_JSON" | jq -r .headSha)
+          RUN_CONCLUSION=$(echo "$RUN_JSON" | jq -r .conclusion)
+          RUN_WORKFLOW=$(echo "$RUN_JSON" | jq -r .workflowName)
+          if [ -z "$RUN_SHA" ] || [ "$RUN_SHA" = "null" ]; then
+            echo "❌ Could not resolve head SHA for run $ARTIFACT_RUN_ID"
+            exit 1
+          fi
+          if [ "$RUN_CONCLUSION" != "success" ]; then
+            echo "❌ Run $ARTIFACT_RUN_ID did not conclude successfully (conclusion: $RUN_CONCLUSION)"
+            exit 1
+          fi
+          if [ "$RUN_WORKFLOW" != "CI Build + Sigstore provenance" ]; then
+            echo "❌ Run $ARTIFACT_RUN_ID is not a CI Build run (workflow: $RUN_WORKFLOW)"
+            exit 1
+          fi
+
+          # Fetch the pushed tag and confirm it points at that exact commit.
+          git fetch --force origin "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
+          TAG_SHA=$(git rev-list -n1 "$TAG_NAME")
+          if [ "$TAG_SHA" != "$RUN_SHA" ]; then
+            echo "❌ Tag $TAG_NAME points at $TAG_SHA but run $ARTIFACT_RUN_ID was built from $RUN_SHA"
+            exit 1
+          fi
+
+          # Verify the tag signature against the committed allowed_signers file.
+          git tag -v "$TAG_NAME"
+          echo "✅ Signed tag $TAG_NAME verified and anchors run $ARTIFACT_RUN_ID"
 
       - name: Download Maven deployment bundle
         env:
@@ -217,46 +295,17 @@ jobs:
           echo "Deployment status: $STATUS_RESPONSE"
           echo "✅ Deployment completed (staged). Visit https://central.sonatype.com/ to publish."
 
-      - name: Verify signed release tag and create GitHub release
+      - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          if ! [[ "$ARTIFACT_RUN_ID" =~ ^[0-9]+$ ]]; then
-            echo "❌ run_id must be a numeric run ID, got: $ARTIFACT_RUN_ID"
-            exit 1
-          fi
-
+          # The tag was verified upstream (signature + anchors the built commit)
+          # before any upload. Create the release only after a successful stage,
+          # so no release object exists for a deployment that failed to upload.
           VERSION=$(xmlstarlet sel -t -v "/_:project/_:version" pom.xml)
           TAG_NAME="v$VERSION"
-
-          # The maintainer creates and pushes the signed tag locally with their
-          # hardware SSH key before dispatching this release. CI never creates
-          # the tag; it verifies that the human-signed tag anchors the exact
-          # commit the ci-build run was built from, then publishes. A full CI +
-          # org-secret compromise cannot forge this tag.
-          git config gpg.ssh.allowedSignersFile "$GITHUB_WORKSPACE/.github/allowed_signers"
-
-          # Commit the ci-build run was built from.
-          RUN_SHA=$(gh run view "$ARTIFACT_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headSha -q .headSha)
-          if [ -z "$RUN_SHA" ]; then
-            echo "❌ Could not resolve head SHA for run $ARTIFACT_RUN_ID"
-            exit 1
-          fi
-
-          # Fetch the pushed tag and confirm it points at that exact commit.
-          git fetch --force origin "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
-          TAG_SHA=$(git rev-list -n1 "$TAG_NAME")
-          if [ "$TAG_SHA" != "$RUN_SHA" ]; then
-            echo "❌ Tag $TAG_NAME points at $TAG_SHA but run $ARTIFACT_RUN_ID was built from $RUN_SHA"
-            exit 1
-          fi
-
-          # Verify the tag signature against the committed allowed_signers file.
-          git tag -v "$TAG_NAME"
-          echo "✅ Signed tag $TAG_NAME verified and anchors run $ARTIFACT_RUN_ID"
-
           gh release create "$TAG_NAME" \
             --title "Release $VERSION" \
             --notes "Release $VERSION deployed to Maven Central (staged)" \

@@ -105,6 +105,8 @@ Various examples under `src/test/java/com/risquanter/examples` demonstrate fitti
 
 ## Release verification
 
+How a release is cut and published is in [docs/RELEASE.md](docs/RELEASE.md).
+
 Artifacts on Maven Central are GPG-signed (key `0F0D975BADB0C1F45F5424A20BCC447FF2426979`,
 published on `keyserver.ubuntu.com`) and carry Sigstore bundles (`*.sigstore.json`) bound to this
 repository's CI workflow identity:
